@@ -2,7 +2,7 @@
 
 Organize seus aportes: você define quanto cada classe e cada ativo deve pesar na carteira, informa quanto tem para investir e o Aporte+ monta a ordem de compra — cotas inteiras na bolsa, valor exato em cripto e no exterior, aplicação em renda fixa — e manda o que sobrar para o Caixa de Oportunidade.
 
-**Acesse:** https://wanderson009luiz-commits.github.io/aporte-mais/
+**Acesse:** https://wanderson009luiz-commits.github.io/aporte-mais/ · versão 4.0.0
 
 - Login por e-mail e senha (Supabase). Cada pessoa vê só a própria carteira.
 - Cotações automáticas e gratuitas: B3 e EUA (Yahoo Finance), cripto (CoinGecko) e câmbio — atualizadas pelo servidor (`supabase/functions/price-refresh`).
