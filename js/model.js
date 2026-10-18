@@ -22,6 +22,15 @@ export const CLASS_TYPES = {
 };
 export const CURRENCIES = ['BRL', 'USD', 'EUR'];
 
+/**
+ * Códigos que mudaram na B3 (incorporação ou troca de código), conferidos em outubro/2026.
+ * O app avisa e oferece a troca — nunca troca sozinho.
+ */
+export const TICKER_CHANGES = {
+  BCFF11: { to: 'BTHF11', note: 'foi incorporado pelo BTHF11 (fusão aprovada pelos cotistas)' },
+  MALL11: { to: 'PMLL11', note: 'mudou de nome, gestão e código para PMLL11' },
+};
+
 export function uid() { return Math.random().toString(36).slice(2, 10); }
 
 export function normTicker(t) { return String(t ?? '').trim().toUpperCase(); }
@@ -155,7 +164,7 @@ export function defaultState() {
       { id: 'etfs', name: 'ETFs', type: 'b3', idealPct: 25, isCash: false, currency: 'BRL', fractional: false, currentValue: 0,
         assets: [A('IVVB11', 40), A('NASD11', 30), A('WRLD11', 20), A('DIVO11', 10)] },
       { id: 'fiis', name: 'FIIs', type: 'b3', idealPct: 20, isCash: false, currency: 'BRL', fractional: false, currentValue: 0,
-        assets: [A('XPLG11', 8), A('HGLG11', 8), A('VILG11', 6), A('XPML11', 7), A('VISC11', 7), A('MALL11', 6), A('KNRI11', 6), A('HGRE11', 6), A('BRCR11', 5), A('DEVA11', 7), A('CPTS11', 6), A('VRTA11', 6), A('BCFF11', 6), A('HGRU11', 8), A('MXRF11', 8)] },
+        assets: [A('XPLG11', 8), A('HGLG11', 8), A('VILG11', 6), A('XPML11', 7), A('VISC11', 7), A('PMLL11', 6), A('KNRI11', 6), A('HGRE11', 6), A('BRCR11', 5), A('DEVA11', 7), A('CPTS11', 6), A('VRTA11', 6), A('BTHF11', 6), A('HGRU11', 8), A('MXRF11', 8)] },
       { id: 'rendafixa', name: 'Renda Fixa', type: 'rendafixa', idealPct: 10, isCash: false, currency: 'BRL', fractional: false, currentValue: 0,
         assets: [A('TESOURO IPCA+', 49), A('TESOURO SELIC', 17), A('LCI/LCA', 17), A('LIQUIDEZ IMEDIATA', 17)] },
       { id: 'cripto', name: 'Criptomoedas', type: 'cripto', idealPct: 5, isCash: false, currency: 'BRL', fractional: true, currentValue: 0,
@@ -188,7 +197,7 @@ export function migrateState(input) {
     if (c.fractional === undefined) c.fractional = t === 'cripto' || t === 'exterior';
     c.currentValue = Math.max(0, num(c.currentValue));
     if (!Array.isArray(c.assets)) c.assets = [];
-    delete c.hasAssets; // derivado do tipo
+    c.hasAssets = CLASS_TYPES[c.type].hasAssets; // mantido só para versões antigas do app lerem a carteira
     c.assets = c.assets.filter((a) => a && typeof a === 'object');
     c.assets.forEach((a) => {
       if (!a.id) a.id = uid();

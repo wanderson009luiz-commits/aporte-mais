@@ -108,6 +108,17 @@ console.log('\n1) Carteira com todos os preços zerados — calcular, registrar,
   await page.waitForTimeout(300);
   const v = await page.locator('.asset-card').first().locator('[data-f="currentValue"]').inputValue();
   check(v === '662,10', `10 × R$ 66,21 = R$ 662,10 (obtido ${v})`);
+  // código que mudou na B3: aviso + botão de troca
+  await page.click('.class-tab:has-text("FIIs")');
+  await page.waitForTimeout(200);
+  const fiis = await page.locator('#asset-list').innerText();
+  check(/BCFF11 foi incorporado pelo BTHF11/.test(fiis) && /Trocar para BTHF11/.test(fiis), 'avisa que BCFF11 virou BTHF11 e oferece a troca');
+  await page.click('[data-action="rename"][data-to="BTHF11"]');
+  await page.waitForTimeout(2000);
+  const tick = await page.evaluate(() => window.__fakeDb().portfolio_state[0].state.classes.find((c) => c.id === 'fiis').assets.map((a) => a.ticker));
+  check(tick.includes('BTHF11') && !tick.includes('BCFF11'), 'troca salva: BCFF11 → BTHF11');
+  check(/Cotação R\$ 8,94/.test(await page.locator('#asset-list').innerText()), 'cotação do BTHF11 aparece depois da troca');
+  await page.screenshot({ path: `${shots}/04b-troca-codigo.png`, fullPage: true });
   await page.close();
 }
 

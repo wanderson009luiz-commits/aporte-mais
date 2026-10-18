@@ -5,8 +5,9 @@ import {
   CLASS_TYPES, CURRENCIES, classType, classCurrency, buyMode, hasAssets, quoteSource, quoteKey, normTicker,
   assetPrice, assetValue, isAutoValued, classValueNative, classValueBRL, portfolioTotalBRL, fxRate, sumIdeal, isHundred,
   defaultState, migrateState, trackedTickers, parseNum, toCents, todayISO, nextAporteDate, uid,
-} from './model.js';
-import { planAporte, applyPlan, validateForPlan, alignmentScore } from './engine.js';
+  TICKER_CHANGES,
+} from './model.js?v=dev';
+import { planAporte, applyPlan, validateForPlan, alignmentScore } from './engine.js?v=dev';
 
 const APP_VERSION = '4.0.0';
 const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
@@ -297,6 +298,7 @@ function resetSession() {
 let saveTimer = null, saving = false, saveQueued = false, dirty = false;
 function scheduleSave() {
   if (!stateLoaded || conflict) return;
+  if (state?.undo) state.undo.after = (Number(state.undo.after) || 0) + 1; // mudanças feitas depois do ponto de desfazer
   dirty = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 700);
@@ -792,7 +794,7 @@ async function registrarAporte() {
   try {
     const prev = JSON.parse(JSON.stringify({ ...state, undo: undefined }));
     const { state: next, record } = applyPlan(state, plan, market(), { date: todayISO(), obs });
-    next.undo = { kind: 'aporte', aporteId: record.id, at: new Date().toISOString(), label: 'aporte de ' + moneyC(plan.aporte), prev };
+    next.undo = { kind: 'aporte', aporteId: record.id, at: new Date().toISOString(), label: 'aporte de ' + moneyC(plan.aporte), prev, after: -1 };
     state = next;
     lastPlan = null;
     $('aporte-valor').value = ''; $('aporte-obs').value = '';
@@ -809,7 +811,8 @@ async function registrarAporte() {
 async function undoLast() {
   const u = state?.undo;
   if (!u || !u.prev) { toast('Não há nada para desfazer.'); return; }
-  const ok = await confirmBox('Desfazer?', `Isso volta a carteira para como estava antes do ${esc(u.label || 'último registro')}.`, 'Desfazer');
+  const later = Number(u.after) > 0 ? '<br><br><b>Atenção:</b> as alterações que você fez depois disso também serão desfeitas.' : '';
+  const ok = await confirmBox('Desfazer?', `Isso volta a carteira para como estava antes do ${esc(u.label || 'último registro')}.${later}`, 'Desfazer');
   if (!ok) return;
   state = migrateState(u.prev);
   state.undo = null;
@@ -834,6 +837,8 @@ function quoteHint(c, a) {
   const qTxt = q ? `Cotação ${priceTxt(q.price, q.currency)} · ${ago(q.updated_at)}${q.change_percent != null ? ` · ${q.change_percent >= 0 ? '+' : ''}${pct(q.change_percent)}% no dia` : ''}` : '';
   if (p.source === 'manual') return `Usando o preço digitado.${q ? ` ${qTxt} · <button class="link-btn" data-action="auto-price">usar automático</button>` : ''}`;
   if (p.source === 'auto') return qTxt;
+  const ch = TICKER_CHANGES[t];
+  if (ch && !q) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-to="${esc(ch.to)}">Trocar para ${esc(ch.to)}</button> <span>· se você tinha cotas, confira na corretora a quantidade convertida.</span>`;
   if (failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>`;
   if (p.source === 'cache') return '<span class="warn-txt">Sem cotação agora — usando o último preço conhecido.</span>';
   return quotesRefreshing ? 'Buscando cotação…' : '<span class="warn-txt">Sem cotação ainda. Toque em "Atualizar cotações agora" ou digite o preço.</span>';
@@ -899,6 +904,13 @@ function renderAtivos() {
     on('minQty', 'change', (e) => { a.minQty = Math.max(1, Math.round(parseNum(e.target.value)) || 1); scheduleSave(); renderAtivos(); });
     on('nota', 'change', (e) => { const v = e.target.value.trim(); a.termometro.nota = v === '' ? null : Math.max(0, Math.min(100, Math.round(parseNum(v)))); scheduleSave(); renderAtivos(); renderTopbar(); });
     card.querySelector('[data-action="auto-price"]')?.addEventListener('click', () => { a.priceMode = 'auto'; scheduleSave(); renderAtivos(); renderTopbar(); });
+    card.querySelector('[data-action="rename"]')?.addEventListener('click', (e) => {
+      const to = e.currentTarget.dataset.to;
+      if (cls.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === to)) { toast(`${to} já está nesta classe.`); return; }
+      a.ticker = to; a.priceMode = 'auto'; a.lastQuotePrice = 0;
+      scheduleSave(); renderAtivos(); renderTopbar(); debounceQuoteRefresh();
+      toast(`Trocado para ${to}. Buscando a cotação…`);
+    });
     card.querySelector('[data-action="toggle-term"]').addEventListener('click', () => card.querySelector('[data-term-panel]').classList.toggle('open'));
     card.querySelector('[data-action="remove"]').addEventListener('click', async () => {
       if (!(await confirmBox('Remover ativo?', `Remover <b>${esc(a.ticker || 'este ativo')}</b> de ${esc(cls.name)}? O valor dele deixa de contar no patrimônio.`, 'Remover'))) return;
@@ -968,6 +980,7 @@ function renderConfig() {
         cls.assets = [];
       }
       cls.type = nt;
+      cls.hasAssets = CLASS_TYPES[nt].hasAssets;
       cls.currency = classCurrency(cls);
       cls.fractional = nt === 'cripto' || nt === 'exterior';
       scheduleSave(); renderConfig(); renderTopbar(); debounceQuoteRefresh();
@@ -981,7 +994,7 @@ function renderConfig() {
       if (!(await confirmBox('Remover classe?', `Remover "${esc(cls.name)}"${cls.assets.length ? ` e seus ${cls.assets.length} ativo(s)` : ''}? Dá para desfazer em Histórico.`, 'Remover'))) return;
       const prev = JSON.parse(JSON.stringify({ ...state, undo: undefined }));
       state.classes = state.classes.filter((c) => c.id !== cls.id);
-      state.undo = { kind: 'classe', at: new Date().toISOString(), label: 'remoção da classe ' + cls.name, prev };
+      state.undo = { kind: 'classe', at: new Date().toISOString(), label: 'remoção da classe ' + cls.name, prev, after: -1 };
       scheduleSave(); renderConfig(); renderTopbar();
       toast('Classe removida.', { action: { label: 'Desfazer', run: undoLast } });
     });
@@ -1103,7 +1116,7 @@ async function importBackup(e) {
   if (!(await confirmBox('Importar backup?', `O backup tem ${migrated.classes.length} classes, ${nAssets} ativos e ${migrated.aportes.length} aportes. Ele vai substituir a carteira atual (dá para desfazer em Histórico).`, 'Importar'))) return;
   const prev = JSON.parse(JSON.stringify({ ...state, undo: undefined }));
   state = migrated;
-  state.undo = { kind: 'import', at: new Date().toISOString(), label: 'importação do backup', prev };
+  state.undo = { kind: 'import', at: new Date().toISOString(), label: 'importação do backup', prev, after: -1 };
   activeAtivosClassId = state.classes.find((c) => hasAssets(c))?.id || null;
   scheduleSave(); renderConfig(); renderTopbar(); debounceQuoteRefresh();
   toast('Backup importado.', { action: { label: 'Desfazer', run: undoLast } });
@@ -1131,7 +1144,7 @@ function wire() {
     inputs[inputs.length - 1]?.focus();
   });
   $('btn-add-class').addEventListener('click', () => {
-    state.classes.push({ id: uid(), name: 'Nova classe', type: 'b3', idealPct: 0, isCash: false, currency: 'BRL', fractional: false, currentValue: 0, assets: [] });
+    state.classes.push({ id: uid(), name: 'Nova classe', type: 'b3', hasAssets: true, idealPct: 0, isCash: false, currency: 'BRL', fractional: false, currentValue: 0, assets: [] });
     scheduleSave(); renderConfig();
   });
   $('btn-export-backup').addEventListener('click', exportBackup);

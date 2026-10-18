@@ -19,7 +19,7 @@
 import {
   classType, classCurrency, buyMode, hasAssets, assetPrice, assetValue, isAutoValued,
   classValueNative, fxRate, sumIdeal, isHundred, normTicker, toCents, todayISO, uid,
-} from './model.js';
+} from './model.js?v=dev';
 
 function num(v) { const n = typeof v === 'number' ? v : parseFloat(v); return Number.isFinite(n) ? n : 0; }
 function fmtPctTxt(v) { return (Math.round(v * 100) / 100).toString().replace('.', ','); }
