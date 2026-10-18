@@ -1,0 +1,60 @@
+name: Testar e publicar
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  testes:
+    name: Testes (motor de cálculo + interface)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Testes do motor de cálculo (inclui 4.000 carteiras aleatórias)
+        run: npm test
+      - name: Instalar navegador de teste
+        run: |
+          npm install --no-save playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - name: Testes de ponta a ponta (desktop e celular)
+        run: node tests/e2e/run.mjs e2e-prints
+      - name: Guardar prints dos testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prints-dos-testes
+          path: e2e-prints
+          retention-days: 7
+
+  publicar:
+    name: Publicar no GitHub Pages
+    needs: testes
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Montar o site (só os arquivos do app)
+        run: |
+          mkdir -p _site
+          cp -r index.html manifest.webmanifest icon.svg icon-192.png icon-512.png .nojekyll css js _site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

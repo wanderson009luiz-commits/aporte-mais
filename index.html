@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Aporte+</title>
+<meta name="description" content="Aporte+ organiza seus aportes: diz quanto comprar de cada ativo para manter a carteira no plano.">
+<meta name="theme-color" content="#11161d">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://vldiylyynkgprpfxyyej.supabase.co wss://vldiylyynkgprpfxyyej.supabase.co; base-uri 'self'; form-action 'self'">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css?v=4.0.0">
+<script src="js/vendor/supabase.js?v=2.117.2" defer></script>
+<script type="module" src="js/app.js?v=4.0.0"></script>
+</head>
+<body>
+
+<!-- Carregando -->
+<div class="boot-screen" id="boot-screen">
+  <div class="boot-card">
+    <div class="brand-mark">A+</div>
+    <div class="spinner" id="boot-spinner"></div>
+    <h1 id="boot-title">Abrindo sua carteira…</h1>
+    <p id="boot-text">Conectando com segurança.</p>
+    <div id="boot-actions"></div>
+  </div>
+</div>
+
+<!-- Login -->
+<div class="auth-screen" id="auth-screen" style="display:none;">
+  <form class="auth-card" id="auth-form" novalidate>
+    <div class="brand" style="margin-bottom:18px;"><div class="brand-mark">A+</div><div><div class="brand-title">Aporte+</div><div class="brand-sub">Invista com estratégia</div></div></div>
+    <h1 id="auth-title">Entrar</h1>
+    <p id="auth-sub">Sua carteira fica salva na nuvem, só você tem acesso.</p>
+    <div class="auth-field"><label for="auth-email">E-mail</label><input type="email" id="auth-email" autocomplete="email" placeholder="voce@email.com" required></div>
+    <div class="auth-field" id="auth-pass-field"><label for="auth-password">Senha</label><input type="password" id="auth-password" autocomplete="current-password" placeholder="mínimo 8 caracteres" required></div>
+    <div class="auth-actions">
+      <button type="submit" class="btn btn-primary" id="btn-auth-main">Entrar</button>
+    </div>
+    <div class="auth-links">
+      <button type="button" id="btn-auth-toggle">Criar conta</button>
+      <button type="button" id="btn-auth-forgot">Esqueci a senha</button>
+    </div>
+    <div class="auth-msg" id="auth-msg" role="status" aria-live="polite"></div>
+    <div class="auth-note">O Aporte+ organiza a sua estratégia e calcula a ordem de compra. Ele não recomenda investimentos nem executa ordens: quem compra é você, na sua corretora.</div>
+  </form>
+</div>
+
+<!-- App -->
+<div class="app" id="app-root" style="display:none;">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">A+</div>
+      <div><div class="brand-title">Aporte+</div><div class="brand-sub">Invista com estratégia</div></div>
+    </div>
+    <nav aria-label="Seções">
+      <button class="nav-btn" data-tab="painel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span class="full">Painel</span><span class="short">Painel</span></button>
+      <button class="nav-btn" data-tab="aporte"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="full">Aporte</span><span class="short">Aporte</span></button>
+      <button class="nav-btn" data-tab="ativos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span class="full">Ativos</span><span class="short">Ativos</span></button>
+      <button class="nav-btn" data-tab="config"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/></svg><span class="full">Configuração</span><span class="short">Classes</span></button>
+      <button class="nav-btn" data-tab="agenda"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg><span class="full">Agenda</span><span class="short">Agenda</span></button>
+      <button class="nav-btn" data-tab="timeline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="full">Histórico</span><span class="short">Histórico</span></button>
+    </nav>
+    <div class="next-aporte-box"><div class="k">Próximo aporte</div><div class="v" id="sidebar-next-aporte-val">—</div></div>
+    <div class="sidebar-foot">
+      Cotações automáticas (B3, EUA, cripto e câmbio) com atraso de alguns minutos. O app não recomenda compra ou venda: só organiza a sua estratégia.
+      <div style="margin-top:10px;"><span id="sidebar-user" style="display:block; margin-bottom:6px; word-break:break-all;"></span><button class="logout-link" id="btn-logout">Sair da conta</button></div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div class="topbar">
+      <div>
+        <div class="patrimonio-label">Patrimônio total</div>
+        <div class="patrimonio-value" id="patrimonio-total">R$ 0<span class="cents">,00</span></div>
+      </div>
+      <div class="topbar-meta">
+        <div class="meta-item"><div class="k">Cotações</div><div class="v"><button class="quote-chip" id="quote-chip" title="Atualizar cotações agora"><span class="qdot"></span><span id="quote-chip-txt">—</span></button></div></div>
+        <div class="meta-item"><div class="k">Termômetro</div><div class="v" id="meta-term"><span class="term-pill"><span class="tdot"></span>—</span></div></div>
+        <div class="meta-item"><div class="k">Ativos</div><div class="v" id="meta-ativos">0</div></div>
+      </div>
+    </div>
+
+    <!-- PAINEL -->
+    <section id="tab-painel" class="viz-root" data-section>
+      <h2 class="section-title">Painel da carteira</h2>
+      <p class="section-sub">Como sua carteira está hoje em relação ao plano, quanto você já aportou e quanto recebeu de proventos.</p>
+      <div id="painel-container"></div>
+    </section>
+
+    <!-- APORTE -->
+    <section id="tab-aporte" data-section hidden>
+      <h2 class="section-title">Aporte do momento</h2>
+      <p class="section-sub">Informe quanto você tem para investir. O Aporte+ divide o valor entre as classes que estão mais longe do plano, compra cotas inteiras na bolsa, valores exatos em cripto e exterior, aplica em renda fixa — e manda o que sobrar para o Caixa de Oportunidade.</p>
+      <div class="card" id="ready-card"></div>
+      <div class="card">
+        <form class="aporte-input-row" id="aporte-form" novalidate>
+          <div class="aporte-input-wrap money"><label for="aporte-valor">Valor do aporte</label><input type="text" inputmode="decimal" class="aporte-input" id="aporte-valor" placeholder="0,00" autocomplete="off"></div>
+          <div class="aporte-input-wrap" style="flex:1; min-width:200px;"><label for="aporte-obs">Observação (opcional)</label><input type="text" class="obs-input" id="aporte-obs" maxlength="200" placeholder="ex: salário de outubro"></div>
+          <button type="submit" class="btn btn-primary" id="btn-calcular">Calcular ordem de compra</button>
+        </form>
+      </div>
+      <div id="resultado-container"></div>
+    </section>
+
+    <!-- ATIVOS -->
+    <section id="tab-ativos" data-section hidden>
+      <h2 class="section-title">Ativos por classe</h2>
+      <p class="section-sub">Informe o % ideal de cada ativo dentro da classe (soma 100%) e quantas cotas você tem — o preço vem sozinho e o valor é calculado. Em renda fixa, digite o valor aplicado. Se quiser fixar um preço, é só digitá-lo.</p>
+      <div class="class-tabs" id="ativos-class-tabs"></div>
+      <div style="margin-bottom:14px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-sm" id="btn-refresh-prices">↻ Atualizar cotações agora</button>
+        <button class="btn btn-sm" id="btn-refresh-sentiment">↻ Leitura de notícias</button>
+      </div>
+      <div id="asset-list"></div>
+      <div class="config-total"><span class="label">Soma dos percentuais nesta classe</span><span class="val" id="asset-total-val">0%</span></div>
+      <button class="btn btn-ghost" id="btn-add-asset">+ Adicionar ativo</button>
+    </section>
+
+    <!-- CONFIG -->
+    <section id="tab-config" data-section hidden>
+      <h2 class="section-title">Classes e percentual ideal</h2>
+      <p class="section-sub">Defina como seu patrimônio deve estar dividido — a soma precisa fechar em 100%. O tipo da classe define de onde vem a cotação e como a compra é montada. Uma classe precisa ser o Caixa de Oportunidade (recebe as sobras).</p>
+      <div class="card">
+        <div class="col-labels class v4"><div>Classe</div><div>Tipo</div><div>Ideal</div><div>Valor atual</div><div>Moeda</div><div>Fração</div><div title="Caixa de Oportunidade">Caixa</div><div></div></div>
+        <div id="class-list"></div>
+        <div class="config-total"><span class="label">Soma dos percentuais</span><span class="val" id="config-total-val">0%</span></div>
+      </div>
+      <button class="btn btn-ghost" id="btn-add-class">+ Adicionar classe</button>
+
+      <h2 class="section-title" style="margin-top:34px;">Câmbio</h2>
+      <p class="section-sub">Usado para somar no patrimônio as classes em dólar ou euro. A cotação automática é atualizada várias vezes ao dia; se preferir, fixe um valor.</p>
+      <div class="fx-grid" id="fx-grid"></div>
+
+      <h2 class="section-title" style="margin-top:34px;">Backup dos dados</h2>
+      <p class="section-sub">Seus dados ficam salvos na nuvem, na sua conta. Exportar um backup de vez em quando protege contra qualquer imprevisto.</p>
+      <div class="card" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <button class="btn" id="btn-export-backup">⭳ Exportar backup (.json)</button>
+        <button class="btn btn-ghost" id="btn-import-backup">⭱ Importar backup</button>
+        <input type="file" id="input-import-backup" accept="application/json,.json" hidden>
+        <span style="font-size:12px; color:var(--text-faint);">Importar substitui a carteira atual (dá para desfazer importando o backup anterior).</span>
+      </div>
+
+      <h2 class="section-title" style="margin-top:34px;">Conta</h2>
+      <div class="card"><div class="account-line"><span>Conectado como <b id="account-email">—</b></span><button class="btn btn-sm" id="btn-change-pass">Trocar senha</button></div></div>
+    </section>
+
+    <!-- AGENDA -->
+    <section id="tab-agenda" data-section hidden>
+      <h2 class="section-title">Agenda de aportes</h2>
+      <p class="section-sub">Escolha sua rotina. O app apenas lembra e calcula — nunca investe automaticamente por você.</p>
+      <div class="agenda-next-card">
+        <div class="icon">◷</div>
+        <div><div class="k">Próximo aporte</div><div class="v" id="agenda-next-val">—</div></div>
+      </div>
+      <div class="card">
+        <div class="freq-options" id="freq-options"></div>
+        <div class="agenda-detail" id="agenda-detail"></div>
+      </div>
+    </section>
+
+    <!-- HISTÓRICO -->
+    <section id="tab-timeline" data-section hidden>
+      <h2 class="section-title">Histórico</h2>
+      <p class="section-sub">Seus aportes, proventos e marcos. Registre um provento recebido abaixo — você decide se ele entra no Caixa agora ou fica só de registro.</p>
+      <div class="card">
+        <form class="divform" id="div-form" novalidate>
+          <div class="field"><label for="div-ticker">Ticker</label><input type="text" id="div-ticker" placeholder="ex: MXRF11" style="width:110px;" autocomplete="off"></div>
+          <div class="field"><label for="div-tipo">Tipo</label>
+            <select id="div-tipo"><option>Dividendo</option><option>JCP</option><option>Rendimento</option><option>Cashback</option><option>Outro</option></select>
+          </div>
+          <div class="field"><label for="div-valor">Valor (R$)</label><input type="text" inputmode="decimal" id="div-valor" placeholder="0,00" style="width:100px;" autocomplete="off"></div>
+          <div class="field"><label for="div-data">Data</label><input type="date" id="div-data" style="width:150px;"></div>
+          <div class="chk-row"><input type="checkbox" id="div-add-caixa" checked><label for="div-add-caixa">Somar ao Caixa agora</label></div>
+          <button type="submit" class="btn btn-sm" id="btn-add-div">Registrar provento</button>
+        </form>
+      </div>
+      <div class="card" id="aportes-card"></div>
+      <div id="timeline-container"></div>
+    </section>
+
+    <div class="disclaimer">Aporte+ é uma ferramenta de organização. Os cálculos seguem as metas que você definiu e não constituem recomendação de investimento. Cotações de fontes públicas (Yahoo Finance, CoinGecko) podem ter atraso ou falhas — confira o preço na corretora antes de comprar.</div>
+  </main>
+</div>
+
+<div class="modal-back" id="modal-back" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal" id="modal"></div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<noscript><p style="padding:20px;color:#e9e5da;">O Aporte+ precisa de JavaScript ativado.</p></noscript>
+</body>
+</html>

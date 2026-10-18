@@ -1,0 +1,5 @@
+node_modules/
+e2e-prints/
+tests/e2e/shots/
+_site/
+.DS_Store
