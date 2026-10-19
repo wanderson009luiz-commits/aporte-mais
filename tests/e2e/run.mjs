@@ -185,7 +185,37 @@ console.log('\n4) Login: senha errada, depois certa');
   await page.click('#btn-auth-main');
   await page.waitForSelector('#auth-msg.show');
   check(/enviamos um link/.test(await txt(page, '#auth-msg')), 'recuperar senha envia link');
+  // "Criar conta" com e-mail que já tem conta: o Supabase responde ok e NÃO envia e-mail — o app tem de dizer isso (caso real de 19/10/2026)
+  const msgIs = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('#auth-msg')?.textContent || ''), re.source, { timeout: 4000 }).then(() => true, () => false);
+  await page.click('#btn-auth-toggle'); // recuperar → login
+  await page.click('#btn-auth-toggle'); // login → criar conta
+  await page.fill('#auth-email', 'pessoa@teste.com');
+  await page.fill('#auth-password', 'qualquer12345');
+  await page.click('#btn-auth-main');
+  check(await msgIs(/Já existe uma conta com este e-mail/) && !/Conta criada/.test(await txt(page, '#auth-msg')), '"Criar conta" com e-mail que já tem conta avisa e manda usar "Esqueci a senha" (não diz que enviou e-mail)');
+  await page.click('#btn-auth-toggle'); // login → criar conta
+  await page.fill('#auth-email', 'nova@teste.com');
+  await page.fill('#auth-password', 'outra12345');
+  await page.click('#btn-auth-main');
+  check(await msgIs(/Conta criada! Abra o e-mail de confirmação/), 'conta nova: pede para abrir o e-mail de confirmação');
   await page.close();
+  // link do e-mail vencido ou já usado: explica e limpa o endereço
+  const expired = await newPage('scenario=zerada&run=4b&session=0#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired');
+  await expired.waitForSelector('#auth-screen:not([style*="none"])');
+  await expired.waitForSelector('#auth-msg.show');
+  check(/expirou ou já foi usado/.test(await txt(expired, '#auth-msg')) && !(await expired.evaluate(() => location.hash)), 'link vencido: aviso claro na tela de login e endereço limpo');
+  await expired.close();
+  // link de "Esqueci a senha" válido: entra e pede a senha nova na hora
+  const rec = await newPage('scenario=zerada&run=4c&session=0#access_token=fake&refresh_token=fake&expires_in=3600&token_type=bearer&type=recovery');
+  await rec.waitForSelector('#app-root:not([style*="none"])', { timeout: 6000 });
+  await rec.waitForSelector('#np1', { timeout: 4000 });
+  check(/Criar nova senha/.test(await txt(rec, '#modal-title')), 'link de recuperação abre o app pedindo a senha nova');
+  await rec.fill('#np1', 'novaSenha2026');
+  await rec.fill('#np2', 'novaSenha2026');
+  await rec.click('text=Salvar senha');
+  await rec.waitForTimeout(300);
+  check((await rec.evaluate(() => window.__fakeDb().users.find((u) => u.id === 'u1').password)) === 'novaSenha2026', 'senha nova salva');
+  await rec.close();
 }
 
 // ---------------------------------------------------------------- 5

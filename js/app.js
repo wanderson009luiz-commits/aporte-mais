@@ -10,7 +10,7 @@ import {
 import { planAporte, applyPlan, revertAporte, stateSignature, validateForPlan, alignmentScore } from './engine.js?v=dev';
 import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, attentionByAsset, NEWS_WINDOW_DAYS } from './news.js?v=dev';
 
-const APP_VERSION = '4.2.1';
+const APP_VERSION = '4.2.2';
 const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
 // Chave pública (anon) — é feita para ficar no navegador; a proteção real são as regras RLS do banco.
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsZGl5bHl5bmtncHJwZnh5eWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxNjA4NTYsImV4cCI6MjEwNDczNjg1Nn0.mlv8I8EOtRhiZyw2PlVnp2mNMXLZCTJr0acDLMKKjy0';
@@ -250,6 +250,21 @@ function translateAuthError(e) {
   return 'Não foi possível concluir: ' + m;
 }
 const appUrl = () => location.origin + location.pathname;
+/**
+ * Link do e-mail (recuperar senha, confirmar conta) que voltou com erro: vencido, já usado ou
+ * aberto em outro aparelho. O Supabase volta com #error=…&error_code=otp_expired. Devolve a
+ * mensagem para a tela de login (ou null) e limpa o endereço.
+ */
+function emailLinkError() {
+  const hash = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+  const query = new URLSearchParams(location.search || '');
+  const get = (k) => hash.get(k) || query.get(k) || '';
+  const code = get('error_code'), desc = get('error_description'), err = get('error');
+  if (!code && !desc && !err) return null;
+  try { history.replaceState(null, '', location.pathname); } catch { /* sem history: segue */ }
+  if (/otp_expired|expired|invalid/i.test(`${code} ${desc}`)) return 'Esse link do e-mail expirou ou já foi usado. Peça um novo em "Esqueci a senha" e abra só o e-mail mais recente.';
+  return `O link do e-mail não funcionou (${(desc || code || err).slice(0, 120)}). Peça um novo em "Esqueci a senha".`;
+}
 
 async function onAuthSubmit(e) {
   e.preventDefault();
@@ -268,12 +283,19 @@ async function onAuthSubmit(e) {
     } else if (authMode === 'signup') {
       const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: appUrl() } });
       if (error) throw error;
+      // e-mail que já tem conta: o Supabase responde "ok" sem enviar nada (para não revelar quem tem conta)
+      // e devolve o usuário sem identidades — aqui é preciso dizer a verdade, senão a pessoa espera um e-mail que não vem
+      if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        setAuthMode('login');
+        authMsg('Já existe uma conta com este e-mail. Se não lembra a senha, toque em "Esqueci a senha".', 'err');
+        return;
+      }
       if (data.session) await onAuthed(data.user);
-      else { setAuthMode('login'); authMsg('Conta criada! Abra o e-mail de confirmação que enviamos e depois entre aqui.', 'ok'); }
+      else { setAuthMode('login'); authMsg('Conta criada! Abra o e-mail de confirmação que enviamos (veja também o spam) e depois entre aqui.', 'ok'); }
     } else {
       const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: appUrl() });
       if (error) throw error;
-      authMsg('Se existir uma conta com esse e-mail, enviamos um link para criar uma nova senha.', 'ok');
+      authMsg('Se existir uma conta com esse e-mail, enviamos um link para criar uma nova senha. Veja também o spam e abra o link neste mesmo aparelho.', 'ok');
     }
   } catch (err) {
     authMsg(translateAuthError(err), 'err');
@@ -1956,6 +1978,7 @@ function wire() {
     return;
   }
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
+  const linkError = emailLinkError();
   const h = (location.hash || '').slice(1);
   if (TABS.includes(h)) activeTab = h;
   sb.auth.onAuthStateChange((event, session) => {
@@ -1972,7 +1995,7 @@ function wire() {
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (session) await onAuthed(session.user);
-    else showAuth('login');
+    else showAuth('login', linkError ? { text: linkError, kind: 'err' } : null);
   } catch (e) {
     console.error(e);
     showAuth('login', { text: 'Não foi possível verificar sua sessão. Entre novamente.', kind: 'err' });

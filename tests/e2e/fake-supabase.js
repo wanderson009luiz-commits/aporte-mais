@@ -25,6 +25,13 @@
   if (!session && params.get('session') !== '0' && !sessionStorage.getItem(KEY + '-loggedout')) session = { user: { id: 'u1', email: 'pessoa@teste.com' }, access_token: 'fake' };
   const saveSession = () => { sessionStorage.setItem(KEY + '-session', JSON.stringify(session)); };
   let authCb = null;
+  // como o supabase-js com o link de "Esqueci a senha" (#access_token=…&type=recovery): entra, limpa o endereço e avisa PASSWORD_RECOVERY
+  let recovery = false;
+  if (/(^|[#&])type=recovery(&|$)/.test(location.hash.slice(1)) && /access_token=/.test(location.hash)) {
+    recovery = true;
+    session = { user: { id: 'u1', email: 'pessoa@teste.com' }, access_token: 'fake' }; saveSession();
+    history.replaceState(null, '', location.pathname + location.search);
+  }
 
   window.__fakeDb = () => db;
   window.__fakeExternalSave = () => { const r = db.portfolio_state.find((x) => x.portfolio_id === 'p1'); r.updated_at = '2030-01-01T00:00:00.123456+00:00'; persist(); };
@@ -123,7 +130,7 @@
     },
     auth: {
       async getSession() { await delay(10); return { data: { session } }; },
-      onAuthStateChange(cb) { authCb = cb; return { data: { subscription: { unsubscribe() {} } } }; },
+      onAuthStateChange(cb) { authCb = cb; if (recovery) setTimeout(() => cb('PASSWORD_RECOVERY', session), 30); return { data: { subscription: { unsubscribe() {} } } }; },
       async signInWithPassword({ email, password }) {
         await delay(40);
         const u = db.users.find((x) => x.email === email);
@@ -132,9 +139,16 @@
         setTimeout(() => authCb && authCb('SIGNED_IN', session), 0);
         return { data: { user: session.user, session }, error: null };
       },
-      async signUp({ email }) { await delay(40); if (db.users.some((x) => x.email === email)) return { data: {}, error: { message: 'User already registered' } }; return { data: { user: { id: 'u9', email }, session: null }, error: null }; },
+      // como o Supabase de verdade (com confirmação de e-mail): e-mail que já tem conta responde "ok", sem enviar
+      // nada e sem identidades — não dá erro (para não revelar quem tem conta)
+      async signUp({ email }) {
+        await delay(40);
+        const u = db.users.find((x) => x.email === email);
+        if (u) return { data: { user: { id: u.id, email, identities: [] }, session: null }, error: null };
+        return { data: { user: { id: 'u9', email, identities: [{ id: 'i9', provider: 'email' }] }, session: null }, error: null };
+      },
       async resetPasswordForEmail() { await delay(30); return { data: {}, error: null }; },
-      async updateUser() { await delay(30); return { data: {}, error: null }; },
+      async updateUser({ password } = {}) { await delay(30); const u = session && db.users.find((x) => x.id === session.user.id); if (u && password) { u.password = password; persist(); } return { data: {}, error: null }; },
       async signOut() { session = null; sessionStorage.removeItem(KEY + '-session'); sessionStorage.setItem(KEY + '-loggedout', '1'); setTimeout(() => authCb && authCb('SIGNED_OUT', null), 0); return { error: null }; },
     },
   };
