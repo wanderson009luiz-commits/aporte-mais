@@ -8,9 +8,9 @@ import {
   TICKER_CHANGES, convertQty, isISODate,
 } from './model.js?v=dev';
 import { planAporte, applyPlan, revertAporte, stateSignature, validateForPlan, alignmentScore } from './engine.js?v=dev';
-import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, isAttention, bySeverity, NEWS_WINDOW_DAYS } from './news.js?v=dev';
+import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, attentionByAsset, NEWS_WINDOW_DAYS } from './news.js?v=dev';
 
-const APP_VERSION = '4.2.0';
+const APP_VERSION = '4.2.1';
 const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
 // Chave pública (anon) — é feita para ficar no navegador; a proteção real são as regras RLS do banco.
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsZGl5bHl5bmtncHJwZnh5eWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxNjA4NTYsImV4cCI6MjEwNDczNjg1Nn0.mlv8I8EOtRhiZyw2PlVnp2mNMXLZCTJr0acDLMKKjy0';
@@ -760,18 +760,23 @@ function renderNewsEverywhere() {
   if (activeTab === 'noticias') renderNoticias();
   if (activeTab === 'painel') renderPainel();
 }
-/** Notícias que pedem atenção (impacto alto, ou médio e ruim, dos últimos 7 dias) nos ativos da carteira. */
+/**
+ * O que pede atenção (impacto alto, ou médio e ruim, dos últimos 7 dias) nos ativos da carteira:
+ * um item por ativo, com a notícia mais grave dele e quantas outras também pedem atenção.
+ */
 function newsAlerts() {
   const assets = newsAssets(state, quotes, fxCtx());
-  return newsRows.filter((n) => assets.has(n.ticker) && isAttention(n)).sort(bySeverity);
+  return attentionByAsset(newsRows.filter((n) => assets.has(n.ticker)));
 }
+function alertsTxt(n) { return `${n} ${n === 1 ? 'ativo com notícia que pede' : 'ativos com notícias que pedem'} atenção`; }
+function moreTxt(g) { return `+ ${g.more} ${g.more === 1 ? 'outra notícia' : 'outras notícias'} de ${tickerOfKey(g.top.ticker)} ${g.more === 1 ? 'pede' : 'pedem'} atenção`; }
 function updateNewsBadge() {
   const b = $('news-badge');
   if (!b) return;
   const n = state ? newsAlerts().length : 0;
   b.hidden = n === 0;
   b.textContent = n > 99 ? '99+' : String(n);
-  b.setAttribute('aria-label', `${n} ${n === 1 ? 'notícia pede' : 'notícias pedem'} atenção`);
+  b.setAttribute('aria-label', alertsTxt(n));
 }
 function newsItemHtml(n, { showTicker = false } = {}) {
   return `<article class="news-item imp-${n.impact} dir-${n.direction}">
@@ -804,7 +809,7 @@ function renderNoticias() {
     : `${lastCheck ? `Verificado ${esc(ago(new Date(lastCheck).toISOString()))}` : 'Ainda sem verificação'}${newsError ? ` · <span class="warn-txt">${esc(newsError)}</span>` : ''}`;
   if (!assets.size) { box.innerHTML = '<div class="empty-state">Cadastre seus ativos da bolsa, do exterior ou cripto em <b>Ativos</b> para ver as notícias deles aqui.</div>'; return; }
   const rows = filterNews(newsRows, assets, { filter: newsFilter, asset: newsAssetFilter });
-  const attention = rows.filter((n) => isAttention(n)).sort(bySeverity);
+  const attention = attentionByAsset(rows);
   const groups = groupByAsset(rows, assets);
   const indirect = rows.filter((n) => !n.relevant).sort((a, b) => b.published - a.published);
   const withNews = new Set(groups.map((g) => g.asset.key));
@@ -813,7 +818,7 @@ function renderNoticias() {
   if (!newsRows.length && (newsLoading || newsFetching)) { box.innerHTML = '<div class="empty-state">Buscando as notícias dos seus ativos…</div>'; return; }
   html += `<div class="news-summary"><span>Últimos ${NEWS_WINDOW_DAYS} dias:</span><span><b>${cnt.alto}</b> de impacto alto</span><span><b>${cnt.medio}</b> médio</span><span><b>${cnt.baixo}</b> baixo</span><span><b style="color:var(--coral)">${cnt.negativo}</b> ruins</span><span><b style="color:var(--teal)">${cnt.positivo}</b> boas</span></div>`;
   if (attention.length) {
-    html += `<div class="card news-attn"><h3 class="card-title">Precisa da sua atenção</h3><p class="card-sub">Impacto alto, ou médio e ruim, nos últimos 7 dias. Abra a notícia e veja se muda o seu plano para o ativo.</p>${attention.slice(0, 8).map((n) => newsItemHtml(n, { showTicker: true })).join('')}${attention.length > 8 ? `<div class="news-meta">+ ${attention.length - 8} abaixo, em cada ativo.</div>` : ''}</div>`;
+    html += `<div class="card news-attn"><h3 class="card-title">Precisa da sua atenção</h3><p class="card-sub">Impacto alto, ou médio e ruim, nos últimos 7 dias — a mais importante de cada ativo. Abra a notícia e veja se muda o seu plano para o ativo.</p>${attention.slice(0, 8).map((g) => newsItemHtml(g.top, { showTicker: true }) + (g.more ? `<div class="news-meta attn-more">${esc(moreTxt(g))} — veja abaixo, no ativo.</div>` : '')).join('')}${attention.length > 8 ? `<div class="news-meta">+ ${attention.length - 8} ${attention.length - 8 === 1 ? 'ativo' : 'ativos'} com notícias que pedem atenção, abaixo.</div>` : ''}</div>`;
   }
   groups.forEach((g) => {
     const a = g.asset;
@@ -1000,7 +1005,7 @@ function renderPainel() {
   const changes = tickerChangeAlerts();
   const alerts = newsAlerts();
   if (changes.length || alerts.length) {
-    html += `<div class="card attention-card"><h3 class="card-title">Precisa da sua atenção</h3>${changes.map(({ c: cl, a, ch }) => `<div class="attn-row"><div class="attn-txt"><b>${esc(normTicker(a.ticker))}</b> ${esc(ch.note)}.</div><button class="btn btn-sm" data-swap-c="${esc(cl.id)}" data-swap-a="${esc(a.id)}">${esc(swapLabel(cl, a, ch.to, ch.factor))}</button></div>`).join('')}${alerts.slice(0, 3).map((n) => `<div class="attn-row"><div class="attn-txt"><span class="imp-tag ${n.impact}">${IMPACT_TXT[n.impact]}</span> <span class="dir-tag ${n.direction}">${DIR_TXT[n.direction]}</span> <b>${esc(tickerOfKey(n.ticker))}</b>: <a class="news-title" style="display:inline; font-size:13.5px;" href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div></div>`).join('')}${alerts.length ? `<div class="attn-row"><div class="attn-txt" style="color:var(--text-muted);">${alerts.length} ${alerts.length === 1 ? 'notícia pede' : 'notícias pedem'} atenção nos últimos 7 dias.</div><button class="btn btn-sm" data-goto="noticias">Ver notícias</button></div>` : ''}</div>`;
+    html += `<div class="card attention-card"><h3 class="card-title">Precisa da sua atenção</h3>${changes.map(({ c: cl, a, ch }) => `<div class="attn-row"><div class="attn-txt"><b>${esc(normTicker(a.ticker))}</b> ${esc(ch.note)}.</div><button class="btn btn-sm" data-swap-c="${esc(cl.id)}" data-swap-a="${esc(a.id)}">${esc(swapLabel(cl, a, ch.to, ch.factor))}</button></div>`).join('')}${alerts.slice(0, 3).map(({ top: n, more }) => `<div class="attn-row"><div class="attn-txt"><span class="imp-tag ${n.impact}">${IMPACT_TXT[n.impact]}</span> <span class="dir-tag ${n.direction}">${DIR_TXT[n.direction]}</span> <b>${esc(tickerOfKey(n.ticker))}</b>: <a class="news-title" style="display:inline; font-size:13.5px;" href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>${more ? ` <span class="attn-more">(+${more})</span>` : ''}</div></div>`).join('')}${alerts.length ? `<div class="attn-row"><div class="attn-txt" style="color:var(--text-muted);">${esc(alertsTxt(alerts.length))} nos últimos 7 dias.</div><button class="btn btn-sm" data-goto="noticias">Ver notícias</button></div>` : ''}</div>`;
   }
   let distHtml;
   if (total <= 0) {

@@ -1,7 +1,7 @@
 // Notícias da carteira: quais ativos entram, o que pede atenção e em que ordem.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, isAttention, bySeverity, isJunkTitle } from '../js/news.js';
+import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, isAttention, bySeverity, isJunkTitle, attentionByAsset } from '../js/news.js';
 import { migrateState } from '../js/model.js';
 
 const H = 3600e3;
@@ -62,6 +62,23 @@ test('notícias: ordem por gravidade (alto ruim > alto bom > médio ruim …), d
     row({ id: 'b', ticker: 'VALE3', impact: 'baixo', direction: 'negativo', h: 0.5 }),
   ]).sort(bySeverity);
   assert.deepEqual(rows.map((r) => r.id), ['ar2', 'ar', 'ab', 'm', 'b']);
+});
+
+test('notícias: atenção agrupada por ativo — o mesmo fato em vários sites vira um alerta, com a contagem do resto', () => {
+  const rows = cleanNewsRows([
+    // mesmo fato da FLRY3 em quatro sites (caso real de 15/10/2026)
+    row({ id: 'f1', ticker: 'FLRY3', impact: 'medio', direction: 'negativo', h: 30 }),
+    row({ id: 'f2', ticker: 'FLRY3', impact: 'medio', direction: 'negativo', h: 28 }),
+    row({ id: 'f3', ticker: 'FLRY3', impact: 'medio', direction: 'negativo', h: 26 }),
+    row({ id: 'f4', ticker: 'FLRY3', impact: 'medio', direction: 'negativo', h: 50 }),
+    row({ id: 'v1', ticker: 'VALE3', impact: 'alto', direction: 'negativo', h: 60 }),
+    row({ id: 'v2', ticker: 'VALE3', impact: 'medio', direction: 'negativo', h: 2 }),
+    row({ id: 'w1', ticker: 'WEGE3', impact: 'medio', direction: 'positivo', h: 1 }), // não pede atenção
+    row({ id: 'x1', ticker: 'XPML11', impact: 'alto', direction: 'negativo', h: 24 * 9 }), // fora dos 7 dias
+  ]);
+  const groups = attentionByAsset(rows, NOW);
+  assert.deepEqual(groups.map((g) => [g.top.id, g.more]), [['v1', 1], ['f3', 3]], 'VALE3 (alto) antes; da FLRY3 fica a mais recente e conta as outras 3');
+  assert.deepEqual(attentionByAsset([], NOW), []);
 });
 
 test('notícias: filtros e grupos só com ativos da carteira; grupos com algo grave primeiro', () => {

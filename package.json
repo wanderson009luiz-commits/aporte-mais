@@ -1,6 +1,6 @@
 {
   "name": "aporte-mais",
-  "version": "4.2.0",
+  "version": "4.2.1",
   "private": true,
   "type": "module",
   "description": "Aporte+ — organize seus aportes por classe e ativo, com ordem de compra calculada.",

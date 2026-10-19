@@ -33,6 +33,7 @@
   // notícias que a função "news-refresh" falsa grava (h = horas atrás)
   const NEWS = [
     { ticker: 'VALE3', h: 2, impact: 'alto', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'InfoMoney', title: 'Vale tem rompimento de barragem e suspende operações em mina', summary: 'Acidente pode gerar multas e paralisar parte da produção, pressionando resultado e dividendos.' },
+    { ticker: 'VALE3', h: 4, impact: 'medio', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'Money Times', title: 'Vale pode ser multada após acidente em barragem', summary: 'Multa pode pesar no resultado do trimestre.' },
     { ticker: 'MXRF11', h: 5, impact: 'medio', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'FIIs.com.br', title: 'MXRF11 reduz dividendos para R$ 0,09 por cota', summary: 'Rendimento mensal cai pela inadimplência de um CRI da carteira.' },
     { ticker: 'WEGE3', h: 8, impact: 'medio', direction: 'positivo', relevant: true, classified_by: 'ia', source: 'Valor', title: 'WEG tem lucro recorde no 3º trimestre e supera estimativas', summary: 'Lucro acima do esperado reforça a tese de crescimento.' },
     { ticker: 'CRYPTO:BTC', h: 3, impact: 'baixo', direction: 'positivo', relevant: true, classified_by: 'regras', source: 'Cointelegraph', title: 'Bitcoin sobe 3% e volta a US$ 82 mil', summary: null },

@@ -85,6 +85,21 @@ export function isAttention(n, now = Date.now()) {
   return n.relevant && now - n.published <= ATTENTION_DAYS * DAY && (n.impact === 'alto' || (n.impact === 'medio' && n.direction === 'negativo'));
 }
 
+/**
+ * O que pede atenção, um item por ativo: a notícia mais grave (e mais recente) de cada ativo e
+ * quantas outras dele também pedem atenção — o mesmo fato sai em vários sites, e cinco títulos
+ * sobre o mesmo assunto não podem virar cinco alertas. Ativos com algo mais grave vêm primeiro.
+ */
+export function attentionByAsset(rows, now = Date.now()) {
+  const by = new Map();
+  rows.filter((n) => isAttention(n, now)).sort(bySeverity).forEach((n) => {
+    const g = by.get(n.ticker);
+    if (g) g.more++;
+    else by.set(n.ticker, { top: n, more: 0 });
+  });
+  return [...by.values()];
+}
+
 export function filterNews(rows, assets, { filter = 'todas', asset = '' } = {}) {
   return rows.filter((n) => assets.has(n.ticker)
     && (!asset || n.ticker === asset)

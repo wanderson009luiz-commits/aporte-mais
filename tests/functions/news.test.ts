@@ -261,6 +261,16 @@ check(j.upgraded >= 1 && news().find((x: any) => x.id === reg.id)?.classified_by
   check(get("atual")?.summary === "resumo atual" && get("antiga")?.classified_by === "regras", "já lida pelas instruções atuais e com mais de 10 dias: não relidas");
   const sent = JSON.parse(aiBodies[0]?.body.messages[0].content.replace(/^Itens:\n/, "") ?? "[]");
   check(sent.length === 1 && /S&P 500/.test(sent[0].sobre ?? ""), "ETF vai para a IA com o índice que ele replica");
+  check(/participação acionária/.test(req0.body.system) && /também é "neutro"/.test(req0.body.system), "instruções v3: aviso de participação acionária é baixo e neutro");
+}
+// a IA confundiu o ativo (marcou como relevante para o MXRF11 uma notícia do XPML11): o título corrige
+{
+  reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "MXRF11" }] });
+  FEEDS.MXRF11 = rss([{ title: "XPML11 vende fatia de shopping por R$ 456 milhões e anuncia aquisições", source: "Suno", h: 1 }]);
+  aiBodies = [];
+  await call(withClaude, { tickers: ["MXRF11"] }, "USER-TOKEN");
+  const row = news("MXRF11")[0];
+  check(aiBodies.length === 1 && row?.classified_by === "ia" && row?.relevant === false, "notícia de outro fundo gravada como menção, mesmo com a IA dizendo que era do ativo");
 }
 aiMode = "down";
 reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "VALE3" }] });
@@ -343,6 +353,18 @@ console.log("11) texto malformado, linha recusada e rede de segurança da IA");
   check(jj.ok && news("MXRF11").length === 2 && jj.inserted === 2 && jj.checked === 1, "linha recusada pelo banco não derruba as outras nem a verificação");
   const merged = MA.mergeAi({ impact: "baixo", direction: "neutro", relevant: false, summary: "resumo manipulado do título", by: "ia" }, MA.classifyRules("MXRF11 suspende distribuição de rendimentos", MA.fromKey("MXRF11")!));
   check(merged.impact === "alto" && merged.relevant === true && merged.by === "ia", "IA não rebaixa um alerta grave que as regras acharam no título do ativo");
+  // o título decide de quem é a notícia quando é claro (casos reais de 19/10/2026)
+  const ab = (t: string, k: string) => MA.aboutAsset(t, MA.fromKey(k)!);
+  check(ab("XPML11 vende fatia de shopping por R$ 456 milhões e anuncia aquisições", "MXRF11") === "nao", "título só com outro ticker (XPML11) → não é sobre o MXRF11");
+  check(ab("Fleury (FLRY3) testa novas máximas; Vale (VALE3) pode cair ainda mais?", "FLRY3") === "sim"
+    && ab("Fleury (FLRY3) testa novas máximas; Vale (VALE3) pode cair ainda mais?", "VALE3") === null, "título que começa pelo ativo → é sobre ele; o segundo citado fica com a IA");
+  check(ab("Klabin (KLBN11) aprova dividendos", "KLBN4") === "sim" && ab("KLBN11 sobe 3%", "KLBN4") === "sim" && ab("Suzano (SUZB3) e Klabin (KLBN11) sobem", "KLBN4") === null, "outra classe da mesma empresa (KLBN11 × KLBN4) conta como o ativo");
+  check(ab("S&P 500 renova recorde", "IVVB11") === null && ab("PETR4, ABEV3 e AVLL3 renovam extremos de 52 semanas", "ABEV3") === null, "sem ticker, ou ativo no meio do título: a IA decide");
+  check(ab("Itaú (ITUB4) lucra R$ 11 bilhões", "ITSA4") === "nao" && ab("Itaúsa (ITSA4) e Itaú (ITUB4) sobem", "ITSA4") === "sim", "Itaú × Itaúsa: tickers diferentes");
+  check(ab("HASH11 sobe 5% com alta do bitcoin", "CRYPTO:BTC") === null && ab("HASH11 sobe 5% na semana", "CRYPTO:BTC") === "nao", "cripto: nome no título decide");
+  check(ab("XPML11, CPTS11, KNRI11 e HGLG11 são destaques", "XPML11") === null, "lista com 4 tickers: a IA decide (as regras já tratam como lista)");
+  const fixed = MA.mergeAi({ impact: "medio", direction: "neutro", relevant: true, summary: "O XPML11 vendeu fatia de shopping.", by: "ia" }, MA.classifyRules("XPML11 vende fatia de shopping", MA.fromKey("MXRF11")!), "nao");
+  check(fixed.relevant === false && fixed.by === "ia", "IA que confundiu o ativo é corrigida pelo título");
   Deno.env.set("ANTHROPIC_API_KEY", "sk-test");
   aiBodies = [];
   const r0 = await MA.classifyAi([{ asset: MA.fromKey("VALE3")!, news: { title: "Vale tem lucro recorde", url: "https://x", source: "A", published: new Date().toISOString() } }], 3, Date.now() - 1);
