@@ -120,15 +120,19 @@ export function assetPrice(cls, a, quotes) {
   const src = quoteSource(cls);
   const q = quotes && src !== 'none' ? quotes[quoteKey(src, a.ticker)] : null;
   const qPrice = q ? cleanPrice(cls, q.price) : 0;
-  // cotação marcada como velha (a fonte parou de atualizar há dias) não vale como preço atual
-  const qOk = !!q && !q.stale && qPrice > 0 && (q.currency || 'BRL') === classCurrency(cls);
+  const sameCur = !!q && (q.currency || 'BRL') === classCurrency(cls);
+  // cotação marcada como velha (a fonte parou de atualizar há dias, ou não reconhece mais o ticker)
+  // não vale como preço ATUAL — mas continua sendo o último preço real conhecido
+  const qOk = sameCur && !q.stale && qPrice > 0;
+  const qLast = sameCur && q.stale && qPrice > 0 ? qPrice : 0;
   const manual = cleanPrice(cls, a.price);
   const cached = cleanPrice(cls, a.lastQuotePrice);
   if (a.priceMode === 'manual' && manual > 0) return { price: manual, source: 'manual', quote: qOk ? q : null };
   if (qOk) return { price: qPrice, source: 'auto', quote: q };
-  // sem cotação agora (fonte fora do ar): só a última cotação real conhecida.
-  // Um preço digitado em versões antigas NÃO é usado no automático — pode estar velho
-  // (ex.: fundo que deixou de ser negociado). Para usar um preço digitado, fixe-o (modo manual).
+  // sem cotação atual: o último preço real conhecido (o da fonte, mesmo velho, é o mais recente;
+  // depois o gravado no último aporte). Um preço digitado em versões antigas NÃO é usado no
+  // automático — pode estar velho. Para usar um preço digitado, fixe-o (modo manual).
+  if (qLast > 0) return { price: qLast, source: 'cache', quote: q };
   if (cached > 0) return { price: cached, source: 'cache', quote: null };
   return { price: 0, source: 'none', quote: null };
 }
@@ -301,9 +305,10 @@ export function migrateState(input) {
       valorBRL: x.valorBRL == null ? num(x.valor) : num(x.valorBRL), currency: CURRENCIES.includes(x.currency) ? x.currency : 'BRL',
       modo: ['lote', 'fracao', 'valor'].includes(x.modo) ? x.modo : 'lote',
     })),
-    deltas: Array.isArray(a.deltas) ? objs(a.deltas).slice(0, 20000).map((x) => ({
+    deltas: Array.isArray(a.deltas) ? objs(a.deltas).slice(0, 20000).map((x) => prune({
       classId: str(x.classId, 64), assetId: x.assetId == null ? null : str(x.assetId, 64),
       field: x.field === 'qty' ? 'qty' : 'currentValue', amount: num(x.amount), label: str(x.label, 60),
+      value: x.value == null ? undefined : num(x.value), currency: CURRENCIES.includes(x.currency) ? x.currency : undefined,
     })) : undefined,
     prevLastAporteDate: isISODate(a.prevLastAporteDate) ? a.prevLastAporteDate : null,
   }));

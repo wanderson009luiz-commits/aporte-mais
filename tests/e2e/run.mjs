@@ -580,6 +580,39 @@ console.log('\n22) Exportar backup salva a carteira de verdade; aviso que sumiu 
   await page.close();
 }
 
+
+// ---------------------------------------------------------------- 23
+console.log('\n23) Fonte parada ou ticker que sumiu: o patrimônio usa o último preço real, nunca zero');
+{
+  const page = await openApp('scenario=zerada&run=23');
+  await page.click('.nav-btn[data-tab="ativos"]');
+  await page.click('.class-tab:has-text("FIIs")');
+  const card = page.locator('.asset-card').filter({ has: page.locator('[data-f="ticker"][value="XPLG11"]') });
+  await card.locator('[data-f="qty"]').fill('100'); await card.locator('[data-f="qty"]').press('Tab');
+  await page.waitForTimeout(1500);
+  const before = money(await txt(page, '#patrimonio-total'));
+  check(Math.abs(before - 9989) < 0.02, `100 XPLG11 × R$ 99,89 = R$ 9.989,00 (obtido ${before})`);
+  // a cotação fica 8 dias sem atualizar e a função de cotações sai do ar
+  await page.evaluate(() => { const db = window.__fakeDb(); db.ticker_quotes.find((x) => x.ticker === 'XPLG11').updated_at = new Date(Date.now() - 8 * 864e5).toISOString(); sessionStorage.setItem('fake-db-zerada-23', JSON.stringify(db)); });
+  const u = new URL(page.url()); u.searchParams.set('quotes', 'fail'); u.hash = '';
+  await page.goto(u.toString());
+  await page.waitForSelector('#app-root:not([style*="none"])'); await page.waitForTimeout(800);
+  const after = money(await txt(page, '#patrimonio-total'));
+  check(Math.abs(after - 9989) < 0.02, `com a cotação velha o patrimônio continua R$ 9.989,00 (obtido ${after})`);
+  await page.click('.nav-btn[data-tab="ativos"]'); await page.click('.class-tab:has-text("FIIs")');
+  const hint = await page.locator('.asset-card').filter({ has: page.locator('[data-f="ticker"][value="XPLG11"]') }).innerText();
+  check(/parou de atualizar/.test(hint) && /último preço conhecido \(R\$ 99,89\)/.test(hint), 'Ativos avisa que a fonte parou e mostra o preço usado');
+  await page.click('.nav-btn[data-tab="aporte"]');
+  check(/sem cotação recente/.test(await txt(page, '#ready-card')), 'o checklist avisa que um ativo vai usar o último preço conhecido');
+  // ticker com cotas que nunca teve preço: cálculo bloqueado (senão a carteira valeria R$ 0)
+  await page.evaluate(() => { const db = window.__fakeDb(); const st = db.portfolio_state[0].state; st.classes[0].assets.push({ id: 'zz1', ticker: 'ZZZZ3', idealPct: 0, qty: 50, price: 0, priceMode: 'auto', currentValue: 0, minQty: 1 }); sessionStorage.setItem('fake-db-zerada-23', JSON.stringify(db)); });
+  await page.reload(); await page.waitForSelector('#app-root:not([style*="none"])'); await page.waitForTimeout(800);
+  await page.click('.nav-btn[data-tab="aporte"]');
+  await page.fill('#aporte-valor', '1000'); await page.click('#btn-calcular'); await page.waitForTimeout(300);
+  check(/ZZZZ3 tem cotas, mas nenhum preço conhecido/.test(await txt(page, '#resultado-container')), 'posição sem nenhum preço bloqueia o cálculo com explicação');
+  await page.close();
+}
+
 console.log(`\n${passes} ok, ${failures} falha(s)`);
 if (errors.length) { console.log('\nErros de JavaScript na página:'); errors.forEach((e) => console.log('  ' + e)); }
 await browser.close();

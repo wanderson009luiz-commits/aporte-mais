@@ -96,9 +96,10 @@ const round2 = (v) => Math.round((Number(v) || 0) * 100 + 1e-7) / 100;
 function readField(input, { label = 'Valor', min = 0, max = 1e12, int = false, allowEmpty = true } = {}) {
   const raw = String(input?.value ?? '').trim();
   if (raw === '') return allowEmpty ? { ok: true, empty: true, value: 0 } : { ok: false, msg: `${label}: preencha o campo.` };
-  const letters = raw.replace(/R\$|US\$|€|\d|[eE](?=[+-]?\d)|[\s.,+\-()%]/g, '');
+  const core = raw.replace(/R\$|US\$|€|%|\s/g, '').replace(/^\((.*)\)$/, '-$1');
+  const shape = /^[+-]?(\d{1,3}([.,]\d{3})+|\d+)([.,]\d*)?$/.test(core) || /^[+-]?[.,]\d+$/.test(core) || /^[+-]?(\d+\.?\d*|\.\d+)[eE][+-]?\d+$/.test(core);
   const v = parseNum(raw);
-  if (letters || !/\d/.test(raw) || !Number.isFinite(v)) return { ok: false, msg: `${label}: "${raw}" não é um número válido.` };
+  if (!shape || !Number.isFinite(v)) return { ok: false, msg: `${label}: "${raw}" não é um número válido.` };
   if (v < 0 && min >= 0) return { ok: false, msg: `${label}: não pode ser negativo.` };
   if (v < min) return { ok: false, msg: `${label}: o mínimo é ${min.toLocaleString('pt-BR')}.` };
   if (v > max) return { ok: false, msg: `${label}: o máximo é ${max.toLocaleString('pt-BR')}.` };
@@ -410,12 +411,26 @@ function scheduleSave() {
   saveTimer = setTimeout(saveNow, 700);
 }
 /** Grava a carteira. Gravação condicional: o banco só aceita se ninguém salvou depois que esta tela leu. */
+/** Antes de salvar: cada ativo com cotas guarda o último preço real visto (rede de segurança se a fonte cair). */
+function rememberLivePrices() {
+  state?.classes.forEach((c) => {
+    if (!hasAssets(c) || buyMode(c) === 'valor') return;
+    c.assets.forEach((a) => {
+      if (!(Number(a.qty) > 0)) return;
+      const p = assetPrice(c, a, quotes);
+      if (p.source === 'auto' && p.price > 0 && Number(a.lastQuotePrice) !== p.price) a.lastQuotePrice = p.price;
+    });
+  });
+}
+let slowSave = false;
 async function saveNow() {
   if (!stateLoaded || conflict) return false;
   if (saving) { saveQueued = true; return false; }
   saving = true;
   const gen = editGen;
   let ok = false;
+  const slowTimer = setTimeout(() => { if (saving) { slowSave = true; renderSaveBanner(); } }, 5000);
+  rememberLivePrices();
   try {
     const nowIso = new Date().toISOString();
     const { data, error } = await sb.from('portfolio_state').update({ state, updated_at: nowIso })
@@ -450,6 +465,8 @@ async function saveNow() {
     clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 5000);
   } finally {
     saving = false;
+    clearTimeout(slowTimer);
+    if (slowSave) { slowSave = false; renderSaveBanner(); }
     if (saveQueued && !conflict) { saveQueued = false; saveNow(); }
   }
   return ok;
@@ -466,7 +483,7 @@ async function flushSave() {
 function reportSave(ok, what) {
   if (ok) return true;
   dialog({ title: `${what} — ainda NÃO salvo na nuvem`, html: conflict
-    ? '<p>A carteira foi alterada em outro aparelho, então esta tela não está salvando. Veja o aviso no topo: baixe um backup desta tela ou recarregue.</p>'
+    ? '<p>A carteira foi alterada em outro aparelho, então esta tela não está salvando.</p><p><b>Se recarregar, o que você fez aqui (incluindo este aporte) some.</b> Baixe o backup desta tela, ou use "Substituir a do outro aparelho" no aviso do topo se esta tela tem a versão certa.</p>'
     : '<p>Sem conexão com a nuvem agora. O app continua tentando sozinho — <b>não feche esta página</b> até o aviso do topo sumir. Se preferir, baixe um backup agora.</p>',
     buttons: [{ label: 'Fechar', value: null }, { label: 'Baixar backup', kind: 'primary', value: 'b' }] }).then((v) => { if (v) exportBackup(); });
   return false;
@@ -483,6 +500,10 @@ function renderSaveBanner() {
   } else if (saveFailing) {
     b.className = 'save-banner warn';
     b.innerHTML = '<span>Sem conexão com a nuvem — <b>suas últimas alterações ainda não foram salvas</b>. Tentando de novo…</span>';
+    b.hidden = false;
+  } else if (slowSave) {
+    b.className = 'save-banner warn';
+    b.innerHTML = '<span>Salvando na nuvem… a conexão está lenta. <b>Não feche esta página</b> até este aviso sumir.</span>';
     b.hidden = false;
   } else { b.hidden = true; b.innerHTML = ''; }
 }
@@ -529,8 +550,12 @@ function applyQuoteRows(rows) {
     if (!r || typeof r.ticker !== 'string') return;
     const price = Number(r.price);
     const t = Date.parse(r.updated_at);
-    quotes[r.ticker] = { price: Number.isFinite(price) ? price : 0, currency: String(r.currency || 'BRL').toUpperCase(), change_percent: r.change_percent == null ? null : Number(r.change_percent),
-      updated_at: r.updated_at, stale: !Number.isFinite(t) || Date.now() - t > QUOTE_STALE_MS };
+    const failed = String(r.currency || '').toUpperCase() === 'ERR';
+    // "ERR": a fonte não reconhece o ticker. O preço que vier junto é o último preço real conhecido
+    // (na moeda da bolsa daquele ticker); nunca vale como cotação atual.
+    const currency = failed ? (r.ticker.startsWith('US:') ? 'USD' : 'BRL') : String(r.currency || 'BRL').toUpperCase();
+    quotes[r.ticker] = { price: Number.isFinite(price) && price > 0 ? price : 0, currency, change_percent: r.change_percent == null ? null : Number(r.change_percent),
+      updated_at: r.updated_at, failed, stale: failed || !Number.isFinite(t) || Date.now() - t > QUOTE_STALE_MS };
   });
 }
 function applyFxRows(rows) {
@@ -571,7 +596,7 @@ async function refreshQuotes({ silent = true } = {}) {
     }
     failedQuoteKeys = failed;
     lastQuoteRefresh = Date.now();
-    if (!silent) toast(failed.size ? `Cotações atualizadas. ${failed.size} ticker(s) sem cotação — veja em Ativos.` : 'Cotações atualizadas.');
+    if (!silent) toast(failed.size ? `Cotações atualizadas. ${plural(failed.size, 'ticker ficou', 'tickers ficaram')} sem cotação — veja em Ativos.` : 'Cotações atualizadas.');
   } catch (e) {
     console.error('Falha ao atualizar cotações', e);
     quoteRefreshError = true;
@@ -627,7 +652,7 @@ document.addEventListener('visibilitychange', () => { if (stateLoaded && documen
 
 function newestQuoteTime() {
   let best = 0;
-  trackedTickers(state || { classes: [] }).forEach((t) => { const q = quotes[quoteKey(t.source, t.ticker)]; if (q?.updated_at && q.currency !== 'ERR') best = Math.max(best, new Date(q.updated_at).getTime() || 0); });
+  trackedTickers(state || { classes: [] }).forEach((t) => { const q = quotes[quoteKey(t.source, t.ticker)]; if (q?.updated_at && !q.failed) best = Math.max(best, new Date(q.updated_at).getTime() || 0); });
   return best ? new Date(best).toISOString() : null;
 }
 function renderQuoteChip() {
@@ -786,6 +811,15 @@ function barChartSVG(bars, color, aria) {
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}">${g}</svg>`;
 }
 
+/** Ativos com cotas e nenhum preço conhecido (o patrimônio mostrado fica menor do que o real). */
+function unpricedHoldings() {
+  const out = [];
+  state.classes.forEach((c) => {
+    if (!hasAssets(c) || buyMode(c) === 'valor') return;
+    c.assets.forEach((a) => { if (Number(a.qty) > 0 && !(assetPrice(c, a, quotes).price > 0) && !(Number(a.currentValue) > 0)) out.push(normTicker(a.ticker) || '(sem ticker)'); });
+  });
+  return out;
+}
 function renderPainel() {
   const c = $('painel-container');
   const fx = fxCtx();
@@ -799,7 +833,7 @@ function renderPainel() {
   const provAno = state.dividendos.filter((d) => String(d.date || '').startsWith(ano)).reduce((s, d) => s + (Number(d.valor) || 0), 0);
   const alignColor = align === null ? 'var(--text-faint)' : align >= 90 ? 'var(--teal)' : align >= 75 ? 'var(--amber)' : 'var(--coral)';
   let html = `<div class="kpi-grid">
-    <div class="kpi"><div class="k">Patrimônio</div><div class="v">${compact(total)}</div><div class="s num">R$ ${n2(total)}</div></div>
+    <div class="kpi"><div class="k">Patrimônio</div><div class="v">${compact(total)}</div><div class="s num">R$ ${n2(total)}</div>${unpricedHoldings().length ? `<div class="s" style="color:var(--coral);">Incompleto: ${esc(unpricedHoldings().join(', '))} sem preço</div>` : ''}</div>
     <div class="kpi"><div class="k">Total aportado</div><div class="v">${compact(totalAportado)}</div><div class="s">${aportes.length} aporte${aportes.length === 1 ? '' : 's'} registrado${aportes.length === 1 ? '' : 's'}</div></div>
     <div class="kpi"><div class="k">Proventos recebidos</div><div class="v">${compact(proventos)}</div><div class="s">R$ ${n2(provAno)} em ${ano}</div></div>
     <div class="kpi"><div class="k">Alinhamento com o plano</div><div class="v" style="color:${alignColor}">${align === null ? '—' : pct1(align) + '%'}</div><div class="s">${align === null ? 'Cadastre suas quantidades para medir' : align >= 90 ? 'Carteira próxima do ideal' : align >= 75 ? 'Alguns ajustes pendentes' : 'Carteira longe do plano'}</div></div>
@@ -892,6 +926,9 @@ function renderReady() {
   const cashErr = r.errors.find((e) => e.code.startsWith('caixa') || e.code === 'sem_caixa');
   items.push(cashErr ? { k: 'bad', t: esc(cashErr.msg) + ' <button class="link-btn act" data-goto="config">Ajustar</button>' } : { k: 'ok', t: `Caixa de Oportunidade: <b>${esc(state.classes.find((c) => c.isCash)?.name || '')}</b>.` });
   r.errors.filter((e) => e.code === 'sem_cambio').forEach((e) => items.push({ k: 'bad', t: esc(e.msg) }));
+  r.errors.filter((e) => e.code === 'posicao_sem_preco').forEach((e) => items.push({ k: 'bad', t: esc(e.msg) + ' <button class="link-btn act" data-goto="ativos">Ver em Ativos</button>' }));
+  const shown = new Set(['soma_classes', 'soma_ativos', 'classe_vazia', 'sem_caixa', 'caixa_duplo', 'caixa_com_ativos', 'caixa_moeda', 'sem_cambio', 'posicao_sem_preco']);
+  r.errors.filter((e) => !shown.has(e.code)).forEach((e) => items.push({ k: 'bad', t: esc(e.msg) }));
   const dupes = [], invalid = [];
   state.classes.forEach((c) => {
     if (!hasAssets(c)) return;
@@ -968,7 +1005,7 @@ function orderLines(plan) {
   group('CRIPTO (valor exato)', plan.orders.filter((o) => o.mode === 'fracao' && o.classType !== 'exterior'),
     (o) => `Comprar ${moneyC(o.valueNative, o.currency)} de ${o.ticker} (≈ ${qtyTxt(o.qty, 'fracao')})`);
   group('RENDA FIXA', plan.orders.filter((o) => o.mode === 'valor'), (o) => `Aplicar ${moneyC(o.valueNative, o.currency)} em ${o.ticker}${ex(o)}`);
-  group('RESERVAR', plan.classes.filter((c) => c.directBRL > 0 && !c.isCash), (c) => `${moneyC(c.directNative, c.currency)} em ${c.name}`);
+  group('RESERVAR', plan.classes.filter((c) => c.directBRL > 0 && !c.isCash), (c) => `${moneyC(c.directNative, c.currency)} em ${c.name}${c.currency !== 'BRL' ? ` (≈ ${moneyC(c.directBRL)})` : ''}`);
   const cash = plan.toCash + plan.cashDirect;
   if (cash > 0) lines.push('', `CAIXA DE OPORTUNIDADE: ${moneyC(cash)}${plan.cashDirect && plan.toCash ? ` (${moneyC(plan.cashDirect)} do plano + ${moneyC(plan.toCash)} de sobras)` : ''}`);
   return lines;
@@ -992,7 +1029,7 @@ function renderResultado() {
   if (frac.length) html += `<div class="order-section-title">Comprar valor exato</div><div class="order-list">${frac.map((o) => row(esc(o.ticker), `${esc(o.className)} · ≈ ${qtyTxt(o.qty, 'fracao')} a ${priceTxt(o.price, o.currency)}${src(o)}`, moneyC(o.valueNative, o.currency) + (o.currency !== 'BRL' ? `<div class="oi-sub">≈ ${moneyC(o.valueBRL)}</div>` : ''))).join('')}</div>`;
   if (valor.length) html += `<div class="order-section-title">Aplicar</div><div class="order-list">${valor.map((o) => row(esc(o.ticker), esc(o.className), moneyC(o.valueNative, o.currency))).join('')}</div>`;
   const directs = plan.classes.filter((c) => c.directBRL > 0 && !c.isCash);
-  if (directs.length) html += `<div class="order-section-title">Reservar</div><div class="order-list">${directs.map((c) => row(esc(c.name), 'valor direto', moneyC(c.directNative, c.currency))).join('')}</div>`;
+  if (directs.length) html += `<div class="order-section-title">Reservar</div><div class="order-list">${directs.map((c) => row(esc(c.name), 'valor direto', moneyC(c.directNative, c.currency) + (c.currency !== 'BRL' ? `<div class="oi-sub">≈ ${moneyC(c.directBRL)}</div>` : ''))).join('')}</div>`;
   const cashTotal = plan.toCash + plan.cashDirect;
   html += `<div class="order-section-title">Caixa de Oportunidade</div><div class="order-list">${row(esc(state.classes.find((c) => c.isCash)?.name || 'Caixa'), `parte do plano ${moneyC(plan.cashDirect)} + sobras ${moneyC(plan.toCash)}`, moneyC(cashTotal))}</div>`;
   if (!plan.orders.length && !directs.length) html += '<div class="empty-state">Nada pôde ser comprado com este valor — tudo vai para o Caixa de Oportunidade.</div>';
@@ -1041,7 +1078,7 @@ function renderResultado() {
 
 let registering = false;
 async function registrarAporte() {
-  if (registering) return;
+  if (registering) { toast('Aguarde: ainda salvando o aporte anterior…'); return; }
   if (!lastPlan) return;
   if (conflict) { dialog({ title: 'Não dá para registrar agora', html: '<p>A carteira foi alterada em outro aparelho e esta tela não está salvando. Recarregue para pegar a versão mais recente (veja o aviso no topo) e calcule de novo.</p>' }); return; }
   if (invalidatePlanIfStale()) return;
@@ -1083,13 +1120,14 @@ async function undoAporte(aporteId) {
   const ok = await confirmBox('Desfazer este aporte?', `Aporte de <b>${money(Number(rec.disponivel) || 0)}</b> em ${fmtDateBR(rec.date)}. Vou tirar da carteira exatamente o que ele somou:<br><span style="font-size:12px; color:var(--text-muted);">${parts.join(' · ')}</span><br><br>O que você fez depois (proventos, outras edições) continua como está.`, 'Desfazer aporte');
   if (!ok) return;
   let res;
-  try { res = revertAporte(state, aporteId); } catch (e) { dialog({ title: 'Não foi possível desfazer', html: `<p>${esc(e.message)}</p>` }); return; }
+  try { res = revertAporte(state, aporteId, market()); } catch (e) { dialog({ title: 'Não foi possível desfazer', html: `<p>${esc(e.message)}</p>` }); return; }
   state = res.state;
   dirty = true; editGen++;
   renderTopbar(); switchTab(activeTab);
   const notes = [];
   if (res.missing.length) notes.push(`Não existem mais e ficaram como estão: ${res.missing.map(esc).join(', ')}.`);
   if (res.clamped.length) notes.push(`Já tinham menos do que o aporte somou e ficaram em zero: ${res.clamped.map(esc).join(', ')}. Confira em Ativos.`);
+  if (res.manual.length) notes.push(`Não deu para tirar sozinho (a classe mudou depois do aporte) — ajuste à mão em Ativos: ${res.manual.map((m) => `${esc(m.label)}: ${money(m.amount, m.currency)}`).join(' · ')}.`);
   const saved = await flushSave();
   if (reportSave(saved, 'Aporte desfeito')) {
     if (notes.length) dialog({ title: 'Aporte desfeito — confira', html: `<p>${notes.join('</p><p>')}</p>` });
@@ -1117,18 +1155,19 @@ function quoteHint(c, a) {
   if (!t) return '<span class="warn-txt">Digite o ticker.</span>';
   if (!isQuotableTicker(t)) return `<span class="bad-txt">"${esc(t)}" não é um ticker válido — use só letras e números, sem espaços (ex.: PETR4).</span>`;
   if (c.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === t)) return `<span class="bad-txt">${esc(t)} aparece duas vezes nesta classe — junte as quantidades em uma linha só e remova a outra.</span>`;
-  const qFailed = q && q.currency === 'ERR';
-  if (q && q.stale && !qFailed && p.source !== 'manual') return `<span class="bad-txt">A última cotação de ${esc(t)} é de ${ago(q.updated_at).replace('há ', '')} atrás — a fonte parou de atualizar. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ' <span class="warn-txt">Usando o último preço conhecido.</span>' : ''}`;
+  const qFailed = !!q && !!q.failed;
+  if (q && q.stale && !qFailed && p.source !== 'manual') return `<span class="bad-txt">A última cotação de ${esc(t)} é de ${ago(q.updated_at).replace('há ', '')} atrás — a fonte parou de atualizar. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ` <span class="warn-txt">Usando o último preço conhecido (${priceTxt(p.price, classCurrency(c))}).</span>` : ''}`;
   if (q && !qFailed && q.currency !== classCurrency(c)) return `<span class="bad-txt">A cotação de ${esc(t)} veio em ${esc(q.currency)}, diferente da classe (${classCurrency(c)}). Confira o tipo da classe.</span>`;
   const qTxt = q && !qFailed ? `Cotação ${priceTxt(q.price, q.currency)} · ${ago(q.updated_at)}${q.change_percent != null ? ` · ${q.change_percent >= 0 ? '+' : ''}${pct(q.change_percent)}% no dia` : ''}` : '';
-  if (p.source === 'manual') return `Usando o preço digitado.${qTxt ? ` ${qTxt} · <button class="link-btn" data-action="auto-price">usar automático</button>` : ''}`;
+  if (p.source === 'manual') return `Usando o preço digitado.${qTxt ? ` ${qTxt} · <button class="link-btn" data-action="auto-price" data-key="${esc(a.id)}:auto-price">usar automático</button>` : ''}`;
   if (p.source === 'auto') return qTxt;
   const ch = TICKER_CHANGES[t];
-  if (ch && (!q || qFailed)) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-to="${esc(ch.to)}">Trocar para ${esc(ch.to)}</button> <span>· se você tinha cotas, confira na corretora a quantidade convertida.</span>`;
-  if (qFailed || failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ' <span class="warn-txt">Usando o último preço conhecido.</span>' : ''}`;
-  if (p.source === 'cache') return '<span class="warn-txt">Sem cotação agora — usando o último preço conhecido.</span>';
-  const oldPrice = a.priceMode === 'auto' && Number(a.price) > 0 ? cleanPrice(c, a.price) : 0;
-  const useOld = oldPrice > 0 ? ` <button class="link-btn" data-action="use-old-price">usar o preço digitado antes (${priceTxt(oldPrice, classCurrency(c))})</button>` : '';
+  if (ch && (!q || qFailed)) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-key="${esc(a.id)}:rename" data-to="${esc(ch.to)}">Trocar para ${esc(ch.to)}</button> <span>· se você tinha cotas, confira na corretora a quantidade convertida.</span>`;
+  // preço digitado numa versão antiga: oferecido quando não há nenhum outro preço real
+  const oldPrice = p.source === 'none' && a.priceMode === 'auto' && Number(a.price) > 0 ? cleanPrice(c, a.price) : 0;
+  const useOld = oldPrice > 0 ? ` <button class="link-btn" data-action="use-old-price" data-key="${esc(a.id)}:use-old">usar o preço digitado antes (${priceTxt(oldPrice, classCurrency(c))})</button>` : '';
+  if (qFailed || failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ` <span class="warn-txt">Usando o último preço conhecido (${priceTxt(p.price, classCurrency(c))}).</span>` : ''}${useOld}`;
+  if (p.source === 'cache') return `<span class="warn-txt">Sem cotação agora — usando o último preço conhecido (${priceTxt(p.price, classCurrency(c))}).</span>`;
   return (quotesRefreshing ? 'Buscando cotação…' : '<span class="warn-txt">Sem cotação ainda. Toque em "Atualizar cotações agora" ou digite o preço.</span>') + useOld;
 }
 
@@ -1172,14 +1211,14 @@ function renderAtivos() {
     const s = sentimentCache[normTicker(a.ticker)];
     const termOpen = openTermPanels.has(a.id);
     card.innerHTML = `<div class="asset-card-main">${fields}
-        <button class="term-toggle" data-action="toggle-term" aria-expanded="${termOpen}"><span class="term-dot" style="background:${tl.color}"></span>${a.termometro.nota === null ? 'Termômetro' : esc(a.termometro.nota) + '/100'}</button>${s ? `<span class="mini-sentiment ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span>` : ''}
-        <div class="asset-card-actions"><button class="icon-btn" data-action="remove" title="Remover ativo" aria-label="Remover ${esc(a.ticker || 'ativo')}">✕</button></div>
+        <button class="term-toggle" data-action="toggle-term" data-key="${esc(a.id)}:term" aria-expanded="${termOpen}"><span class="term-dot" style="background:${tl.color}"></span>${a.termometro.nota === null ? 'Termômetro' : esc(a.termometro.nota) + '/100'}</button>${s ? `<span class="mini-sentiment ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span>` : ''}
+        <div class="asset-card-actions"><button class="icon-btn" data-action="remove" data-key="${esc(a.id)}:remove" title="Remover ativo" aria-label="Remover ${esc(a.ticker || 'ativo')}">✕</button></div>
         <div class="asset-hint-row">${quoteHint(cls, a)}</div>
       </div>
       <div class="term-panel ${termOpen ? 'open' : ''}" data-term-panel>
         <div class="term-panel-row"><div class="field small"><label>Nota (0-100)</label><input class="plain-input" style="width:80px;" inputmode="numeric" value="${a.termometro.nota === null ? '' : esc(a.termometro.nota)}" ${k('nota')} placeholder="—"></div><div style="font-size:12px; color:${tl.color}; font-weight:600;">${tl.label}</div></div>
         <div data-motivos></div>
-        <button class="btn btn-sm btn-ghost" data-action="add-motivo">+ Adicionar motivo</button>
+        <button class="btn btn-sm btn-ghost" data-action="add-motivo" data-key="${esc(a.id)}:add-motivo">+ Adicionar motivo</button>
         <div class="sentiment-box" style="margin-top:16px;"><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); margin-bottom:8px;">Leitura automática de notícias</div>${renderSentimentBox(a.ticker)}</div>
       </div>`;
     const on = (f, ev, fn) => { const el = card.querySelector(`[data-f="${f}"]`); if (el) el.addEventListener(ev, fn); };
@@ -1191,7 +1230,7 @@ function renderAtivos() {
     field('idealPct', { label: '% ideal', max: 100 }, (r) => { a.idealPct = r.value; });
     field('currentValue', { label: 'Valor', max: 1e11 }, (r) => { a.currentValue = round2(r.value); });
     field('minAmount', { label: 'Mínimo', max: 1e9 }, (r) => { a.minAmount = round2(r.value); });
-    field('qty', { label: 'Quantidade', max: 1e12 }, (r) => { a.qty = r.value; });
+    field('qty', { label: mode === 'lote' ? 'Quantidade (cotas inteiras)' : 'Quantidade', max: 1e12, int: mode === 'lote' }, (r) => { a.qty = r.value; });
     field('price', { label: 'Preço', max: 1e9 }, (r) => {
       const v = cleanPrice(cls, r.value);
       if (!r.empty && r.value > 0 && v > 0) { a.price = v; a.priceMode = 'manual'; } else { a.price = 0; a.priceMode = 'auto'; }
@@ -1300,13 +1339,13 @@ async function changeClassType(cls, nt) {
     }
   } else {
     // cada ativo mantém o valor de hoje; se no tipo novo ele não for calculado por cotas × preço, o valor é guardado
+    const hadQty = cls.assets.some((a) => Number(a.qty) > 0);
     next.assets.forEach((a, i) => {
-      const old = assetValue(cls, cls.assets[i], quotes);
-      a.currentValue = round2(old * conv);
-      if (nt === 'rendafixa') { a.qty = Number(a.qty) || 0; }
-      if (oldCur !== newCur && a.priceMode === 'manual') { a.price = 0; a.priceMode = 'auto'; }
-      a.lastQuotePrice = oldCur !== newCur || quoteSource(next) !== quoteSource(cls) ? 0 : a.lastQuotePrice;
+      // o valor de hoje fica guardado em cada ativo; as cotas zeram (no tipo novo seriam de outro mercado)
+      a.currentValue = round2(assetValue(cls, cls.assets[i], quotes) * conv);
+      a.qty = 0; a.price = 0; a.priceMode = 'auto'; a.lastQuotePrice = 0;
     });
+    if (hadQty) notes.push('As quantidades de cotas são zeradas e o valor de hoje de cada ativo fica guardado. Se voltar ao tipo anterior, digite as quantidades de novo em Ativos.');
     if (quoteSource(next) !== quoteSource(cls) && CLASS_TYPES[nt].quote !== 'none') notes.push(`As cotações passam a vir de ${{ b3: 'Bolsa Brasil (B3)', us: 'bolsa dos EUA, em US$', crypto: 'corretoras de cripto' }[CLASS_TYPES[nt].quote]} — confira se os tickers continuam certos.`);
     if (nt === 'rendafixa') notes.push('Os ativos passam a ser contados pelo valor aplicado (sem cotas): guardo o valor de hoje de cada um.');
   }
@@ -1339,10 +1378,10 @@ function renderConfig() {
       <div class="cr-cell cr-type" data-label="Tipo"><select class="plain-select type-select" ${k('type')} ${cls.isCash ? 'disabled title="O Caixa é sempre de valor direto"' : ''}>${Object.entries(CLASS_TYPES).map(([key, v]) => `<option value="${key}" ${key === t ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
       <div class="cr-cell cr-pct" data-label="Ideal"><div class="pct-input-wrap"><input class="pct-input" inputmode="decimal" value="${pct(cls.idealPct)}" ${k('idealPct')}></div></div>
       <div class="cr-cell cr-val" data-label="Valor atual"><div class="value-input-wrap ${cur === 'USD' ? 'usd' : ''}"><input class="value-input" inputmode="decimal" value="${n2(cv)}" ${k('currentValue')} ${hasAssets(cls) ? 'disabled title="Soma dos ativos da classe"' : ''}></div></div>
-      <div class="cr-cell cr-cur" data-label="Moeda">${curEditable ? `<select class="plain-select" ${k('currency')}>${CURRENCIES.map((c) => `<option value="${c}" ${c === cur ? 'selected' : ''}>${sym(c).trim()}</option>`).join('')}</select>` : `<span style="font-size:13px; color:var(--text-muted); padding:9px 4px; display:inline-block;">${sym(cur).trim()}</span>`}${cls.isCash && cur !== 'BRL' ? ' <button class="link-btn" data-action="cash-brl">Converter para R$</button>' : ''}</div>
+      <div class="cr-cell cr-cur" data-label="Moeda">${curEditable ? `<select class="plain-select" ${k('currency')}>${CURRENCIES.map((c) => `<option value="${c}" ${c === cur ? 'selected' : ''}>${sym(c).trim()}</option>`).join('')}</select>` : `<span style="font-size:13px; color:var(--text-muted); padding:9px 4px; display:inline-block;">${sym(cur).trim()}</span>`}${cls.isCash && cur !== 'BRL' ? ` <button class="link-btn" data-action="cash-brl" data-key="${esc(cls.id)}:cash-brl">Converter para R$</button>` : ''}</div>
       <div class="cr-cell cr-frac">${t === 'exterior' ? `<label class="chk-label" title="Comprar valor exato (fração), sem cota inteira"><input type="checkbox" ${k('fractional')} ${buyMode(cls) === 'fracao' ? 'checked' : ''}> Fração</label>` : t === 'b3' ? '<span class="frac-note" title="Na B3 a compra é sempre em cotas inteiras (o mercado fracionário também negocia cotas inteiras)">cotas inteiras</span>' : ''}</div>
       <label class="cr-cell cr-cash"><input type="radio" name="cash-class" class="chk-cash" ${k('isCash')} ${cls.isCash ? 'checked' : ''} ${canBeCash || cls.isCash ? '' : `disabled title="${t === 'valor' ? 'O Caixa precisa estar em R$' : 'Só uma classe de valor direto pode ser o Caixa'}"`}><span class="cash-word">Caixa</span></label>
-      <div class="cr-cell cr-del"><button class="icon-btn" data-action="remove" title="Remover classe" aria-label="Remover classe ${esc(cls.name)}">✕</button></div>`;
+      <div class="cr-cell cr-del"><button class="icon-btn" data-action="remove" data-key="${esc(cls.id)}:remove" title="Remover classe" aria-label="Remover classe ${esc(cls.name)}">✕</button></div>`;
     const q = (f) => row.querySelector(`[data-f="${f}"]`);
     q('name').addEventListener('change', (e) => { cls.name = e.target.value.trim().slice(0, 40) || 'Classe'; e.target.value = cls.name; scheduleSave(); renderTopbar(); });
     q('idealPct').addEventListener('change', (e) => { if (fieldOr(e.target, { label: '% ideal', max: 100 }, (r) => { cls.idealPct = r.value; })) scheduleSave(); again(); });
@@ -1350,6 +1389,7 @@ function renderConfig() {
       const changed = await changeClassType(cls, e.target.value);
       if (changed) { scheduleSave(); renderTopbar(); debounceQuoteRefresh(); toast('Tipo da classe alterado.'); }
       renderConfig();
+      document.querySelector(`[data-key="${CSS.escape(cls.id + ':type')}"]`)?.focus({ preventScroll: true });
     });
     q('currentValue')?.addEventListener('change', (e) => { if (fieldOr(e.target, { label: 'Valor', max: 1e11 }, (r) => { cls.currentValue = round2(r.value); })) scheduleSave(); again(); renderTopbar(); });
     q('currency')?.addEventListener('change', async (e) => {
@@ -1370,7 +1410,7 @@ function renderConfig() {
       const r = fxRate(cur, fxCtx());
       if (r === null) { toast(`Sem cotação de ${cur} agora — informe o câmbio abaixo.`); return; }
       const v = round2((Number(cls.currentValue) || 0) * r);
-      if (!(await confirmBox('Converter o Caixa para R$?', `${money(Number(cls.currentValue) || 0, cur)} × ${n2(r)} = <b>${money(v)}</b>.`, 'Converter'))) return;
+      if (!(await confirmBox('Converter o Caixa para R$?', `${money(Number(cls.currentValue) || 0, cur)} × ${r.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} = <b>${money(v)}</b>.`, 'Converter'))) return;
       cls.currentValue = v; cls.currency = 'BRL'; scheduleSave(); renderConfig();
     });
     row.querySelector('[data-action="remove"]').addEventListener('click', async () => {
@@ -1457,7 +1497,7 @@ function renderAgendaNext() {
 // ---------------------------------------------------------------------
 function renderTimeline() {
   if (!$('div-data').value) $('div-data').value = todayISO();
-  const aps = [...state.aportes].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).slice(0, 12);
+  const aps = state.aportes.map((a, i) => ({ a, i })).sort((x, y) => (x.a.date < y.a.date ? 1 : x.a.date > y.a.date ? -1 : y.i - x.i)).slice(0, 12).map((x) => x.a);
   $('aportes-card').innerHTML = `<h3 class="card-title" style="margin:0 0 ${aps.length ? 8 : 0}px;">Últimos aportes</h3>` +
     (aps.length ? aps.map((a) => {
       const caixa = a.caixa != null ? Number(a.caixa) : Number(a.sobra || 0);

@@ -409,12 +409,71 @@ test('preço: modo manual sem preço digitado segue a regra do automático (cota
   assert.equal(assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL' } }).price, 61);
 });
 
-test('cotação marcada como velha (fonte parou de atualizar) não vale como preço atual', () => {
+test('cotação velha (fonte parada ou ticker que sumiu) não vale como preço atual, mas é o último preço real — nunca vira zero', () => {
   const s = demo();
-  const c = s.classes[0]; const a = c.assets[1];
-  a.priceMode = 'auto'; a.lastQuotePrice = 0;
-  assert.equal(assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL', stale: true } }).price, 0);
-  a.lastQuotePrice = 59.9;
-  assert.deepEqual([assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL', stale: true } }).price, assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL', stale: true } }).source], [59.9, 'cache']);
-  assert.equal(assetPrice(c, a, { VALE3: { price: 0, currency: 'ERR' } }).source, 'cache', 'linha de ticker desconhecido nunca vira preço');
+  const c = s.classes[0]; const a = c.assets[1]; // VALE3
+  a.priceMode = 'auto'; a.lastQuotePrice = 0; a.qty = 10;
+  const stale = { VALE3: { price: 80, currency: 'BRL', stale: true } };
+  assert.deepEqual([assetPrice(c, a, stale).price, assetPrice(c, a, stale).source], [80, 'cache'], 'velha, mas é o último preço real');
+  a.lastQuotePrice = 66.21; // preço do último aporte (mais antigo que a última cotação vista)
+  assert.equal(assetPrice(c, a, stale).price, 80, 'a última cotação vista é mais recente que a do último aporte');
+  assert.equal(assetPrice(c, a, { VALE3: { price: 0, currency: 'BRL', stale: true } }).price, 66.21, 'sem preço na cotação: usa o do último aporte');
+  assert.equal(assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL' } }).source, 'auto');
+  a.lastQuotePrice = 0;
+  assert.equal(assetPrice(c, a, {}).price, 0);
+});
+
+test('posição com cotas e nenhum preço conhecido bloqueia o cálculo (senão a carteira valeria R$ 0)', () => {
+  const s = demo();
+  s.classes[0].assets[1].priceMode = 'auto'; s.classes[0].assets[1].price = 0; s.classes[0].assets[1].qty = 100;
+  const p = planAporte(s, 1000, {});
+  assert.equal(p.ok, false);
+  assert.ok(p.errors.some((e) => e.code === 'posicao_sem_preco' && e.tickers.includes('VALE3')));
+  // com o último preço conhecido (mesmo velho) volta a calcular
+  const p2 = planAporte(s, 1000, { quotes: { VALE3: { price: 61.2, currency: 'BRL', stale: true } } });
+  assert.ok(p2.ok, JSON.stringify(p2.errors));
+});
+
+test('desfazer depois de mudar o tipo da classe tira o valor que o aporte somou', () => {
+  const s = demo();
+  const p = planAporte(s, 1000, {});
+  const { state: s2, record } = applyPlan(s, p, {}, APPLY);
+  // a pessoa muda Ações (cotas) para Renda fixa (valor): cada ativo guarda o valor de hoje e as cotas zeram
+  const s3 = JSON.parse(JSON.stringify(s2));
+  const c = s3.classes[0];
+  c.assets.forEach((a) => { a.currentValue = Math.round(a.qty * a.price * 100) / 100 + (Number(a.currentValue) || 0) * 0; a.qty = 0; });
+  c.type = 'rendafixa';
+  const before = total(s);
+  const res = revertAporte(s3, record.id, {});
+  assert.deepEqual(res.manual, []);
+  assert.ok(Math.abs(total(res.state) - before) < 0.011, `voltou a ${total(res.state)} (antes ${before})`);
+});
+
+test('desfazer com câmbio: aporte em classe em US$ que virou R$ é convertido; sem câmbio vai para conferência manual', () => {
+  const s = st([{ id: 'u', name: 'EUA', type: 'exterior', idealPct: 90, assets: [{ id: 'x', ticker: 'AAPL', idealPct: 100, price: 200, priceMode: 'manual' }] }, CASH(10)], { settings: { fxManual: { USD: 5 } } });
+  const p = planAporte(s, 1000, {});
+  const { state: s2, record } = applyPlan(s, p, {}, APPLY);
+  const s3 = JSON.parse(JSON.stringify(s2));
+  const c = s3.classes[0];
+  c.assets[0].currentValue = Math.round(c.assets[0].qty * 200 * 5 * 100) / 100; c.assets[0].qty = 0; c.type = 'rendafixa'; c.currency = 'BRL';
+  const res = revertAporte(s3, record.id, {});
+  assert.deepEqual(res.manual, []);
+  assert.ok(Math.abs(res.state.classes[0].assets[0].currentValue) < 0.011, 'tirou o valor convertido para R$');
+  const s4 = JSON.parse(JSON.stringify(s3)); s4.settings.fxManual.USD = null;
+  const res2 = revertAporte(s4, record.id, {});
+  assert.equal(res2.manual.length, 1, 'sem câmbio: pede conferência em vez de chutar');
+});
+
+test('desfazer vários aportes do mesmo dia volta a data da agenda para antes deles', () => {
+  let s = demo();
+  s.agenda.lastAporteDate = '2026-10-01';
+  const ids = [];
+  for (let k = 0; k < 3; k++) { const p = planAporte(s, 100, {}); const r = applyPlan(s, p, {}, APPLY); s = r.state; ids.push(r.record.id); }
+  assert.equal(s.agenda.lastAporteDate, '2026-10-18');
+  for (const id of ids) s = revertAporte(s, id, {}).state; // do mais antigo para o mais novo
+  assert.equal(s.agenda.lastAporteDate, null, 'os três eram do mesmo dia: não sobra data de hoje');
+  let t = demo(); t.agenda.lastAporteDate = '2026-10-01';
+  const p1 = planAporte(t, 100, {}); const r1 = applyPlan(t, p1, {}, APPLY); t = r1.state;
+  t = revertAporte(t, r1.record.id, {}).state;
+  assert.equal(t.agenda.lastAporteDate, '2026-10-01', 'aporte único: volta a data anterior');
 });

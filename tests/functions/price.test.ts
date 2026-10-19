@@ -52,7 +52,7 @@ check(r.headers.get("access-control-allow-origin") === "https://wanderson009luiz
 check(q("WEGE3")?.price === 47.99 && q("CRYPTO:BTC")?.price === 400000 && q("US:AAPL")?.currency === "USD", "grava B3, cripto e EUA com a moeda certa");
 check(q("XXXX3")?.currency === "ERR" && q("XXXX3")?.price === 0, "ticker inexistente vira ERR (não insiste por 30 min)");
 check(q("OLD11")?.currency === "BRL" && q("OLD11")?.price === 9.9, "cotação boa recente NÃO é apagada quando a fonte diz 'não existe'");
-check(q("GONE11")?.currency === "ERR", "cotação de 6 dias de um ticker que a fonte não reconhece vira ERR (sem preço velho)");
+check(q("GONE11")?.currency === "ERR" && q("GONE11")?.price === 7.28, "ticker que a fonte não reconhece há 6 dias vira ERR, guardando o último preço real (7,28)");
 check(!q("DOWN3"), "fonte fora do ar (500) não marca o ticker como desconhecido");
 check(q("VALE3")?.price === 61.2, "cotação com mais de 3 min é atualizada");
 check(j.failed.includes("b3:XXXX3") && j.failed.includes("b3:DOWN3") && !j.failed.includes("b3:WEGE3"), "lista de falhas certa para o app");

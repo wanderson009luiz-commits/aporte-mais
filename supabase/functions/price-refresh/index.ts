@@ -14,8 +14,9 @@
 //   - Agendado (cron, corpo vazio): atualiza todos os tickers acompanhados, os mais antigos
 //     primeiro, gravando de 25 em 25 e parando antes do limite de tempo. Roda no máximo uma vez
 //     a cada 10 min (chamadas extras não fazem nada), e responde só contagens.
-// Ticker que a fonte não reconhece fica marcado por 30 min (linha com moeda "ERR" e preço 0)
-// para não insistir; uma cotação boa NUNCA é trocada por "ERR".
+// Ticker que a fonte não reconhece fica marcado por 30 min (linha com moeda "ERR") para não insistir;
+// uma cotação boa recente NUNCA é trocada por "ERR", e quando um ticker morre (5+ dias sem existir na
+// fonte) a linha vira "ERR" mas GUARDA o último preço real (o app usa como último preço conhecido).
 // Em tracked_tickers e ticker_quotes a fonte vai no próprio ticker: "WEGE3" (B3), "US:AAPL"
 // (EUA), "CRYPTO:BTC" (cripto). Linhas que começam com "#" são controle interno.
 // ============================================================
@@ -221,7 +222,8 @@ async function persist(supabase: any, good: QuoteRow[], notFound: string[], dead
   let errors = 0;
   if (dead.length) {
     const cutoff = new Date(Date.now() - DEAD_AFTER_MS).toISOString();
-    const { error } = await supabase.from("ticker_quotes").update({ price: 0, currency: "ERR", change_percent: null, updated_at: new Date().toISOString() })
+    // mantém o preço: é o último preço real conhecido desse ticker
+    const { error } = await supabase.from("ticker_quotes").update({ currency: "ERR", change_percent: null, updated_at: new Date().toISOString() })
       .in("ticker", dead).neq("currency", "ERR").lt("updated_at", cutoff);
     if (error) { errors++; console.error("ticker_quotes dead", error); }
   }
@@ -335,7 +337,8 @@ Deno.serve(async (req) => {
       });
       const errors = await persist(supabase, good, notFound, dead); // falha ao gravar o cache não impede de responder
       good.forEach((r) => byKey.set(r.ticker, r));
-      [...notFound, ...dead].forEach((k) => byKey.set(k, { ticker: k, price: 0, currency: "ERR", change_percent: null, updated_at: now }));
+      notFound.forEach((k) => byKey.set(k, { ticker: k, price: Number(byKey.get(k)?.price) || 0, currency: "ERR", change_percent: null, updated_at: now }));
+      dead.forEach((k) => byKey.set(k, { ...byKey.get(k), currency: "ERR", change_percent: null, updated_at: now }));
       // os que já estavam marcados como desconhecidos também voltam como falha (o app mostra o aviso)
       items.forEach((it) => { const r = byKey.get(quoteKey(it.source, it.ticker)); if (r?.currency === "ERR" && !failed.includes(`${it.source}:${it.ticker}`)) failed.push(`${it.source}:${it.ticker}`); });
       const { data: fxAll } = await supabase.from("exchange_rates").select("pair, bid_price, ask_price, updated_at");

@@ -155,6 +155,12 @@ export function validateForPlan(state, market) {
   }
   const ids = new Set();
   classes.forEach((c) => {
+    if (hasAssets(c) && buyMode(c) !== 'valor') {
+      const semValor = (c.assets || []).filter((a) => num(a.qty) > 0 && !(assetPrice(c, a, quotes).price > 0) && !(num(a.currentValue) > 0))
+        .map((a) => normTicker(a.ticker) || '(sem ticker)');
+      if (semValor.length) errors.push({ code: 'posicao_sem_preco', classId: c.id, tickers: semValor,
+        msg: `${c.name}: ${semValor.join(', ')} ${semValor.length === 1 ? 'tem cotas, mas nenhum preço conhecido' : 'têm cotas, mas nenhum preço conhecido'} — o valor da carteira ficaria errado e o cálculo também. Atualize as cotações ou digite o preço em Ativos.` });
+    }
     if (ids.has(c.id)) errors.push({ code: 'id_duplicado', classId: c.id, msg: `Há duas classes com o mesmo identificador ("${c.name}"). Recarregue a página para o app corrigir.` });
     ids.add(c.id);
     const aids = new Set();
@@ -418,7 +424,7 @@ export function applyPlan(state, plan, market = {}, opts = {}) {
   const addValue = (c, a, cents, label) => {
     const target = a || c;
     target.currentValue = Math.round(num(target.currentValue) * 100 + cents) / 100;
-    deltas.push({ classId: c.id, assetId: a ? a.id : null, field: 'currentValue', amount: cents / 100, label });
+    deltas.push({ classId: c.id, assetId: a ? a.id : null, field: 'currentValue', amount: cents / 100, currency: classCurrency(c), label });
   };
   const one = (list, id, what) => {
     const found = list.filter((x) => x.id === id);
@@ -442,7 +448,7 @@ export function applyPlan(state, plan, market = {}, opts = {}) {
         const qtyMode = isAutoValued(c, a, quotes) || (num(a.qty) <= 0 && toCents(a.currentValue) === 0);
         if (qtyMode) {
           a.qty = num(a.qty) + it.qty; // soma exata: nunca arredonda o que a pessoa já tinha
-          deltas.push({ classId: c.id, assetId: a.id, field: 'qty', amount: it.qty, label: normTicker(a.ticker) });
+          deltas.push({ classId: c.id, assetId: a.id, field: 'qty', amount: it.qty, value: it.value / 100, currency: r.currency, label: normTicker(a.ticker) });
           if (it.priceSource === 'auto' && it.price > 0) a.lastQuotePrice = it.price; // garante valor mesmo se a cotação sumir
           if (!(num(a.price) > 0) && it.price > 0 && it.priceSource !== 'auto') a.price = it.price;
         } else addValue(c, a, it.value, normTicker(a.ticker));
@@ -495,39 +501,59 @@ export function applyPlan(state, plan, market = {}, opts = {}) {
 /**
  * Desfaz SÓ um aporte: tira da carteira exatamente o que ele somou (cotas e valores), apaga o registro
  * e as entradas dele no histórico. Alterações feitas depois (proventos, outras edições) continuam.
- * @returns {{state, record, missing: string[], clamped: string[]}} missing = itens que não existem mais;
- *   clamped = itens que já tinham menos do que o aporte somou (ficaram em zero).
+ * Se depois do aporte a classe mudou de tipo (cotas ↔ valor, R$ ↔ US$), tira o VALOR que o aporte
+ * somou, convertido pelo câmbio quando preciso; o que não der para tirar com segurança volta em `manual`.
+ * @returns {{state, record, missing: string[], clamped: string[], manual: {label:string, amount:number, currency:string}[]}}
+ *   missing = itens que não existem mais; clamped = itens que já tinham menos do que o aporte somou
+ *   (ficaram em zero); manual = o que a pessoa precisa conferir à mão.
  */
-export function revertAporte(state, aporteId) {
+export function revertAporte(state, aporteId, market = {}) {
+  market = market || {};
+  const fx = { auto: market.fx?.auto || {}, manual: state.settings?.fxManual || {} };
   const s = JSON.parse(JSON.stringify(state));
   const rec = (s.aportes || []).find((a) => a.id === aporteId);
   if (!rec) throw new Error('Aporte não encontrado.');
   if (!Array.isArray(rec.deltas)) throw new Error('Este aporte é de uma versão antiga e não pode ser desfeito automaticamente.');
   const missing = [];
   const clamped = [];
+  const manual = [];
+  const convert = (amount, from, to) => {
+    if (!from || from === to) return amount;
+    const a = fxRate(from, fx), b = fxRate(to, fx);
+    return a && b ? Math.round((amount * a / b) * 100) / 100 : null;
+  };
   rec.deltas.forEach((d) => {
     const c = s.classes.find((x) => x.id === d.classId);
-    const target = c && (d.assetId ? (c.assets || []).find((a) => a.id === d.assetId) : c);
-    if (!target) { missing.push(d.label || d.assetId || d.classId); return; }
-    const amount = num(d.amount);
-    if (d.field === 'qty') {
-      const q = num(target.qty) - amount;
-      if (q < -1e-9) clamped.push(d.label || d.assetId);
-      target.qty = Math.abs(q) < 1e-9 || q < 0 ? 0 : q;
-    } else {
-      const v = Math.round((num(target.currentValue) - amount) * 100) / 100;
-      if (v < 0) clamped.push(d.label || d.assetId || d.classId);
-      target.currentValue = Math.max(0, v);
+    const asset = c && d.assetId ? (c.assets || []).find((a) => a.id === d.assetId) : null;
+    const label = d.label || d.assetId || d.classId;
+    if (!c || (d.assetId && !asset)) { missing.push(label); return; }
+    const cur = classCurrency(c);
+    const qtyBased = !!asset && buyMode(c) !== 'valor' && num(asset.qty) > 0; // valor vem de cotas × preço
+    if (d.field === 'qty' && qtyBased) {
+      const q = num(asset.qty) - num(d.amount);
+      if (q < -1e-9) clamped.push(label);
+      asset.qty = Math.abs(q) < 1e-9 || q < 0 ? 0 : q;
+      return;
     }
+    // tirar em dinheiro: o valor pago (compra por cotas) ou o valor aplicado
+    const amount = d.field === 'qty' ? (d.value == null ? null : num(d.value)) : num(d.amount);
+    const v = amount === null ? null : convert(amount, d.currency || cur, cur);
+    const target = asset || c;
+    const valueBased = asset ? (buyMode(c) === 'valor' || !(num(asset.qty) > 0)) : !hasAssets(c);
+    if (v === null || !valueBased) { manual.push({ label, amount: amount ?? 0, currency: d.currency || cur }); return; }
+    const nv = Math.round((num(target.currentValue) - v) * 100) / 100;
+    if (nv < 0) clamped.push(label);
+    target.currentValue = Math.max(0, nv);
   });
   s.aportes = s.aportes.filter((a) => a.id !== aporteId);
   s.timeline = (s.timeline || []).filter((t) => t.aporteId !== aporteId);
   if (s.agenda && s.agenda.lastAporteDate === rec.date) {
-    // a data do último aporte volta a ser a do aporte anterior que ainda existe
-    const prev = s.aportes.map((a) => a.date).filter(Boolean).sort().pop();
-    s.agenda.lastAporteDate = prev || rec.prevLastAporteDate || null;
+    // a data do último aporte volta a ser a do aporte mais recente que ainda existe (ou a de antes, se for anterior)
+    const remaining = s.aportes.map((a) => a.date).filter(Boolean).sort();
+    const before = rec.prevLastAporteDate && rec.prevLastAporteDate < rec.date ? rec.prevLastAporteDate : null;
+    s.agenda.lastAporteDate = remaining.length ? remaining[remaining.length - 1] : before;
   }
-  return { state: s, record: rec, missing, clamped };
+  return { state: s, record: rec, missing, clamped, manual };
 }
 
 function portfolioBRL(s, quotes, fx) {
