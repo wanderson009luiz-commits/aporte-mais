@@ -143,11 +143,11 @@
         <button class="btn" id="btn-export-backup">⭳ Exportar backup (.json)</button>
         <button class="btn btn-ghost" id="btn-import-backup">⭱ Importar backup</button>
         <input type="file" id="input-import-backup" accept="application/json,.json" hidden>
-        <span style="font-size:12px; color:var(--text-faint);">Importar substitui a carteira atual (dá para desfazer importando o backup anterior).</span>
+        <span style="font-size:12px; color:var(--text-faint);">Importar substitui a carteira atual — o app oferece baixar um backup dela antes.</span>
       </div>
 
       <h2 class="section-title" style="margin-top:34px;">Conta</h2>
-      <div class="card"><div class="account-line"><span>Conectado como <b id="account-email">—</b></span><button class="btn btn-sm" id="btn-change-pass">Trocar senha</button></div></div>
+      <div class="card"><div class="account-line"><span>Conectado como <b id="account-email">—</b></span><span class="account-actions"><button class="btn btn-sm" id="btn-change-pass">Trocar senha</button><button class="btn btn-sm" id="btn-logout-2">Sair da conta</button></span></div></div>
     </section>
 
     <!-- AGENDA -->
@@ -181,6 +181,7 @@
         </form>
       </div>
       <div class="card" id="aportes-card"></div>
+      <div class="card" id="proventos-card"></div>
       <div id="timeline-container"></div>
     </section>
 

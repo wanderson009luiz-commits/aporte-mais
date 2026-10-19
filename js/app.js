@@ -4,12 +4,12 @@
 import {
   CLASS_TYPES, CURRENCIES, classType, classCurrency, buyMode, hasAssets, quoteSource, quoteKey, normTicker,
   assetPrice, assetValue, isAutoValued, classValueNative, classValueBRL, portfolioTotalBRL, fxRate, sumIdeal, isHundred,
-  defaultState, migrateState, trackedTickers, parseNum, toCents, todayISO, nextAporteDate, uid,
+  defaultState, migrateState, trackedTickers, parseNum, toCents, todayISO, nextAporteDate, uid, isQuotableTicker, cleanPrice,
   TICKER_CHANGES,
 } from './model.js?v=dev';
-import { planAporte, applyPlan, validateForPlan, alignmentScore } from './engine.js?v=dev';
+import { planAporte, applyPlan, revertAporte, stateSignature, validateForPlan, alignmentScore } from './engine.js?v=dev';
 
-const APP_VERSION = '4.0.0';
+const APP_VERSION = '4.1.0';
 const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
 // Chave pública (anon) — é feita para ficar no navegador; a proteção real são as regras RLS do banco.
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsZGl5bHl5bmtncHJwZnh5eWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxNjA4NTYsImV4cCI6MjEwNDczNjg1Nn0.mlv8I8EOtRhiZyw2PlVnp2mNMXLZCTJr0acDLMKKjy0';
@@ -38,6 +38,8 @@ let activeTab = 'painel';
 let activeAtivosClassId = null;
 let lastPlan = null;
 let lastSyncedTickers = null;
+let sessionUndo = null;           // desfazer rápido (só nesta tela): remoção de classe/ativo
+const openTermPanels = new Set(); // termômetros abertos em Ativos (sobrevivem a re-renderizações)
 let authMode = 'login';
 let booted = false;
 let booting = false;
@@ -83,6 +85,32 @@ function ago(iso) {
   return `há ${Math.round(h / 24)} dias`;
 }
 function fmtDateBR(iso) { if (!iso) return '—'; const [y, m, d] = String(iso).slice(0, 10).split('-'); return esc(`${d}/${m}/${y}`); }
+function plural(n, one, many) { return `${Number(n).toLocaleString('pt-BR')} ${n === 1 ? one : many}`; }
+const round2 = (v) => Math.round((Number(v) || 0) * 100 + 1e-7) / 100;
+
+/**
+ * Lê um campo numérico digitado. Nunca converte em silêncio: devolve {ok:false, msg} quando o texto
+ * não é número, é negativo, passa do limite ou (se int) não é inteiro.
+ */
+function readField(input, { label = 'Valor', min = 0, max = 1e12, int = false, allowEmpty = true } = {}) {
+  const raw = String(input?.value ?? '').trim();
+  if (raw === '') return allowEmpty ? { ok: true, empty: true, value: 0 } : { ok: false, msg: `${label}: preencha o campo.` };
+  const letters = raw.replace(/R\$|US\$|€|\d|[eE](?=[+-]?\d)|[\s.,+\-()%]/g, '');
+  const v = parseNum(raw);
+  if (letters || !/\d/.test(raw) || !Number.isFinite(v)) return { ok: false, msg: `${label}: "${raw}" não é um número válido.` };
+  if (v < 0 && min >= 0) return { ok: false, msg: `${label}: não pode ser negativo.` };
+  if (v < min) return { ok: false, msg: `${label}: o mínimo é ${min.toLocaleString('pt-BR')}.` };
+  if (v > max) return { ok: false, msg: `${label}: o máximo é ${max.toLocaleString('pt-BR')}.` };
+  if (int && !Number.isInteger(v)) return { ok: false, msg: `${label}: use um número inteiro.` };
+  return { ok: true, empty: false, value: v };
+}
+/** Aplica um campo: se inválido, avisa, marca o campo e devolve null (o valor anterior continua). */
+function fieldOr(input, opts, apply) {
+  const r = readField(input, opts);
+  if (!r.ok) { toast(r.msg); input.classList.add('invalid'); setTimeout(() => input.classList.remove('invalid'), 2500); return false; }
+  apply(r);
+  return true;
+}
 
 // ---------------------------------------------------------------------
 // Avisos e diálogos
@@ -98,25 +126,58 @@ function toast(msg, opts = {}) {
   toastTimer = setTimeout(() => t.classList.remove('show'), opts.ms || (opts.action ? 9000 : 3600));
 }
 
-/** Diálogo simples. buttons: [{label, kind:'primary'|'', value}] → Promise com o value clicado (null se fechar). */
+/**
+ * Diálogo simples. buttons: [{label, kind:'primary'|'', value}] → Promise com o value clicado (null se fechar).
+ * Esc e clique fora = fechar (null). Enter num campo = botão principal. O foco fica preso no diálogo e
+ * volta para onde estava ao fechar. Um segundo clique logo depois de abrir não fecha o diálogo.
+ */
+let closeCurrentDialog = null;
 function dialog({ title, html, buttons = [{ label: 'OK', kind: 'primary', value: true }], onOpen }) {
+  if (closeCurrentDialog) closeCurrentDialog(null); // nunca dois ao mesmo tempo
   return new Promise((resolve) => {
     const back = $('modal-back');
     const box = $('modal');
-    box.innerHTML = `<h2 id="modal-title">${esc(title)}</h2>${html || ''}<div class="modal-actions">${buttons.map((b, i) => `<button class="btn ${b.kind === 'primary' ? 'btn-primary' : ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div>`;
+    const opener = document.activeElement;
+    const openedAt = Date.now();
+    let done = false;
+    box.innerHTML = `<h2 id="modal-title">${esc(title)}</h2>${html || ''}<div class="modal-actions">${buttons.map((b, i) => `<button type="button" class="btn ${b.kind === 'primary' ? 'btn-primary' : ''}" data-i="${i}">${esc(b.label)}</button>`).join('')}</div>`;
     back.classList.add('show');
-    const close = (v) => { back.classList.remove('show'); document.removeEventListener('keydown', onKey); resolve(v); };
-    const onKey = (e) => { if (e.key === 'Escape') close(null); };
-    document.addEventListener('keydown', onKey);
-    box.querySelectorAll('[data-i]').forEach((b) => b.addEventListener('click', () => {
-      const btn = buttons[Number(b.dataset.i)];
+    const close = (v) => {
+      if (done) return; done = true;
+      back.classList.remove('show'); document.removeEventListener('keydown', onKey, true); closeCurrentDialog = null;
+      if (opener && opener.isConnected && typeof opener.focus === 'function') { try { opener.focus({ preventScroll: true }); } catch { /* sem foco */ } }
+      resolve(v);
+    };
+    closeCurrentDialog = close;
+    const press = (i) => {
+      const btn = buttons[i];
       if (btn.validate) { const ok = btn.validate(box); if (!ok) return; }
       close(typeof btn.value === 'function' ? btn.value(box) : btn.value);
-    }));
-    back.onclick = (e) => { if (e.target === back) close(null); };
+    };
+    const onKey = (e) => {
+      if (!back.classList.contains('show')) return;
+      if (e.key === 'Escape') { e.preventDefault(); close(null); return; }
+      if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT' && box.contains(e.target)) {
+        const pi = buttons.findIndex((b) => b.kind === 'primary');
+        if (pi >= 0) { e.preventDefault(); press(pi); }
+        return;
+      }
+      if (e.key === 'Tab') { // foco preso dentro do diálogo
+        const f = [...box.querySelectorAll('button, input, select, textarea, a[href]')].filter((x) => !x.disabled && x.offsetParent !== null);
+        if (!f.length) return;
+        const i = f.indexOf(document.activeElement);
+        if (e.shiftKey && (i <= 0)) { e.preventDefault(); f[f.length - 1].focus(); }
+        else if (!e.shiftKey && (i === f.length - 1 || i < 0)) { e.preventDefault(); f[0].focus(); }
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    // o 2º clique de um duplo clique (no botão que abriu o diálogo) não pode fechar nem confirmar nada
+    const fromDouble = (e) => e.detail > 1 && Date.now() - openedAt < 800;
+    box.querySelectorAll('[data-i]').forEach((b) => b.addEventListener('click', (e) => { if (fromDouble(e)) return; press(Number(b.dataset.i)); }));
+    back.onclick = (e) => { if (e.target === back && !fromDouble(e)) close(null); };
     if (onOpen) onOpen(box);
     const first = box.querySelector('input') || box.querySelector('.btn-primary');
-    if (first) setTimeout(() => first.focus(), 30);
+    if (first) setTimeout(() => { if (!done) first.focus(); }, 30);
   });
 }
 const confirmBox = (title, text, okLabel = 'Confirmar') => dialog({ title, html: `<p>${text}</p>`, buttons: [{ label: 'Cancelar', value: false }, { label: okLabel, kind: 'primary', value: true }] });
@@ -292,6 +353,7 @@ async function bootFor(u) {
   await loadMarketFromDb();
   switchTab(activeTab);
   renderTopbar();
+  showMigrationNotes();
   syncTrackedTickers();
   refreshSentimentCache().then(() => { if (activeTab === 'ativos') renderAtivos(); renderTopbar(); });
   const ages = trackedTickers(state).map((t) => quotes[quoteKey(t.source, t.ticker)]?.updated_at).map((x) => (x ? Date.now() - new Date(x).getTime() : Infinity));
@@ -302,6 +364,29 @@ async function bootFor(u) {
 function resetSession() {
   user = null; portfolioId = null; state = null; stateLoaded = false; lastUpdatedAt = null; conflict = false;
   booted = false; lastPlan = null; lastSyncedTickers = null; quotes = {}; failedQuoteKeys = new Set();
+  sessionUndo = null; sentimentCache = {}; openTermPanels.clear(); pendingRender.clear();
+}
+/** Limpa tudo que estava na tela — a próxima pessoa que entrar neste navegador não vê nada da anterior. */
+function resetUI() {
+  activeTab = 'painel'; activeAtivosClassId = null;
+  if (closeCurrentDialog) closeCurrentDialog(null);
+  ['aporte-valor', 'aporte-obs', 'div-ticker', 'div-valor', 'div-data', 'auth-password', 'auth-email'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
+  const chk = $('div-add-caixa'); if (chk) chk.checked = true;
+  ['resultado-container', 'ready-card', 'painel-container', 'asset-list', 'class-list', 'aportes-card', 'proventos-card', 'timeline-container',
+    'ativos-class-tabs', 'fx-grid', 'agenda-detail', 'freq-options'].forEach((id) => { const el = $(id); if (el) el.innerHTML = ''; });
+  if ($('sidebar-user')) $('sidebar-user').textContent = '';
+  if ($('account-email')) $('account-email').textContent = '—';
+  if ($('patrimonio-total')) $('patrimonio-total').textContent = 'R$ 0,00';
+  $('toast')?.classList.remove('show');
+  try { history.replaceState(null, '', location.pathname + location.search); } catch { /* sem histórico */ }
+}
+function showMigrationNotes() {
+  const notes = Array.isArray(state?.migrationNotes) ? state.migrationNotes : [];
+  if (!notes.length) return;
+  dialog({ title: 'Sua carteira foi atualizada', html: `<p>Fizemos ajustes para a versão nova do app:</p><ul>${notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>`,
+    buttons: [{ label: 'Entendi', kind: 'primary', value: true }] }).then(() => {
+    if (state && Array.isArray(state.migrationNotes)) { delete state.migrationNotes; scheduleSave(); }
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -310,7 +395,7 @@ function resetSession() {
 let saveTimer = null, saving = false, saveQueued = false, dirty = false, editGen = 0, saveFailing = false, reloadingForConflict = false;
 function scheduleSave() {
   if (!stateLoaded) return;
-  if (state?.undo) state.undo.after = (Number(state.undo.after) || 0) + 1; // mudanças feitas depois do ponto de desfazer
+  invalidatePlanIfStale();
   dirty = true; editGen++;
   if (conflict) { renderSaveBanner(); return; }
   clearTimeout(saveTimer);
@@ -361,6 +446,24 @@ async function saveNow() {
   }
   return ok;
 }
+/** Grava agora e espera a resposta. true = está na nuvem. */
+async function flushSave() {
+  clearTimeout(saveTimer);
+  for (let i = 0; i < 150 && saving; i++) await new Promise((r) => setTimeout(r, 100));
+  if (!dirty) return true;
+  if (conflict) return false;
+  const ok = await saveNow();
+  return ok && !dirty;
+}
+/** Avisa o resultado de uma gravação importante (registrar/desfazer aporte). */
+function reportSave(ok, what) {
+  if (ok) return true;
+  dialog({ title: `${what} — ainda NÃO salvo na nuvem`, html: conflict
+    ? '<p>A carteira foi alterada em outro aparelho, então esta tela não está salvando. Veja o aviso no topo: baixe um backup desta tela ou recarregue.</p>'
+    : '<p>Sem conexão com a nuvem agora. O app continua tentando sozinho — <b>não feche esta página</b> até o aviso do topo sumir. Se preferir, baixe um backup agora.</p>',
+    buttons: [{ label: 'Fechar', value: null }, { label: 'Baixar backup', kind: 'primary', value: 'b' }] }).then((v) => { if (v) exportBackup(); });
+  return false;
+}
 function renderSaveBanner() {
   const b = $('save-banner'); if (!b) return;
   if (conflict) {
@@ -388,7 +491,7 @@ async function handleConflict(remoteUpdatedAt) {
   renderSaveBanner();
   const choice = await dialog({
     title: 'Carteira alterada em outro lugar',
-    html: '<p>Sua carteira foi salva em outro aparelho ou aba depois que você abriu esta tela. Para não perder nada, recarregue para ver a versão mais recente. Se fez alterações aqui que quer guardar, baixe um backup antes.</p>',
+    html: '<p>Sua carteira foi salva em outro aparelho ou aba depois que você abriu esta tela, e esta tela parou de salvar para não apagar nada.</p><p><b>Recarregar</b> mostra a versão mais recente e descarta as alterações desta tela que não foram salvas — se quiser guardá-las, baixe um backup antes.</p>',
     buttons: [{ label: 'Decidir depois', value: null }, { label: 'Baixar backup desta tela', value: 'backup' }, { label: 'Recarregar (recomendado)', kind: 'primary', value: 'reload' }],
   });
   if (choice === 'backup') exportBackup();
@@ -414,7 +517,12 @@ async function syncTrackedTickers() {
 // Cotações
 // ---------------------------------------------------------------------
 function applyQuoteRows(rows) {
-  (rows || []).forEach((r) => { quotes[r.ticker] = { price: Number(r.price), currency: r.currency || 'BRL', change_percent: r.change_percent == null ? null : Number(r.change_percent), updated_at: r.updated_at }; });
+  // linhas com moeda "ERR" = a fonte não reconhece o ticker (o servidor guarda isso por um tempo para não insistir)
+  (rows || []).forEach((r) => {
+    if (!r || typeof r.ticker !== 'string') return;
+    const price = Number(r.price);
+    quotes[r.ticker] = { price: Number.isFinite(price) ? price : 0, currency: String(r.currency || 'BRL').toUpperCase(), change_percent: r.change_percent == null ? null : Number(r.change_percent), updated_at: r.updated_at };
+  });
 }
 function applyFxRows(rows) {
   (rows || []).forEach((r) => {
@@ -467,17 +575,50 @@ async function refreshQuotes({ silent = true } = {}) {
 function renderAfterMarketChange() {
   if (!state || !stateLoaded) { renderQuoteChip(); return; }
   renderTopbar();
+  invalidatePlanIfStale();
   if (activeTab === 'painel') renderPainel();
-  if (activeTab === 'ativos') renderAtivos();
-  if (activeTab === 'aporte') { renderReady(); if (lastPlan) $('resultado-container').innerHTML = '<div class="msg-box warn">As cotações mudaram. Calcule de novo para ver a ordem com os preços atuais.</div>'; lastPlan = null; }
-  if (activeTab === 'config') renderFxCards();
+  if (activeTab === 'ativos') renderWhenIdle('asset-list', renderAtivos);
+  if (activeTab === 'aporte') renderReady();
+  if (activeTab === 'config') renderWhenIdle('fx-grid', renderFxCards);
+}
+
+// ---------------------------------------------------------------------
+// Re-renderização sem atrapalhar quem está digitando
+// ---------------------------------------------------------------------
+const pendingRender = new Map(); // container → função de render adiada
+function isEditing(containerId) {
+  const el = document.activeElement; const c = $(containerId);
+  return !!(c && el && c.contains(el) && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName));
+}
+/** Atualização "de fundo" (cotações, notícias): espera a pessoa sair do campo. */
+function renderWhenIdle(containerId, fn) { if (isEditing(containerId)) { pendingRender.set(containerId, fn); return; } fn(); }
+/** Atualização por edição da própria pessoa: re-renderiza logo depois e devolve o foco ao mesmo campo. */
+function rerenderKeepFocus(fn) {
+  setTimeout(() => {
+    const ae = document.activeElement;
+    const key = ae && ae.dataset ? ae.dataset.key : null;
+    let sel = null;
+    try { sel = key && typeof ae.selectionStart === 'number' ? [ae.selectionStart, ae.selectionEnd] : null; } catch { sel = null; }
+    fn();
+    if (!key) return;
+    const el = document.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    if (sel) { try { el.setSelectionRange(sel[0], sel[1]); } catch { /* campo sem seleção */ } }
+  }, 0);
+}
+function flushPending(containerId) {
+  setTimeout(() => {
+    const fn = pendingRender.get(containerId);
+    if (fn && !isEditing(containerId)) { pendingRender.delete(containerId); fn(); }
+  }, 0);
 }
 setInterval(() => { if (stateLoaded && document.visibilityState === 'visible' && Date.now() - lastQuoteRefresh > QUOTE_REFRESH_EVERY_MS) refreshQuotes(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (stateLoaded && document.visibilityState === 'visible' && Date.now() - lastQuoteRefresh > QUOTE_REFRESH_EVERY_MS) refreshQuotes(); });
 
 function newestQuoteTime() {
   let best = 0;
-  trackedTickers(state || { classes: [] }).forEach((t) => { const q = quotes[quoteKey(t.source, t.ticker)]; if (q?.updated_at) best = Math.max(best, new Date(q.updated_at).getTime()); });
+  trackedTickers(state || { classes: [] }).forEach((t) => { const q = quotes[quoteKey(t.source, t.ticker)]; if (q?.updated_at && q.currency !== 'ERR') best = Math.max(best, new Date(q.updated_at).getTime() || 0); });
   return best ? new Date(best).toISOString() : null;
 }
 function renderQuoteChip() {
@@ -548,8 +689,9 @@ function termLabel(nota) {
 function renderTopbar() {
   if (!state) return;
   const total = portfolioTotalBRL(state, quotes, fxCtx());
-  const intPart = Math.floor(total + 1e-9);
-  const cent = String(Math.round((total - intPart) * 100)).padStart(2, '0').slice(0, 2);
+  const cents = Math.max(0, Math.round(total * 100 + 1e-7)); // arredonda UMA vez (R$ 50,9995 → R$ 51,00)
+  const intPart = Math.floor(cents / 100);
+  const cent = String(cents % 100).padStart(2, '0');
   $('patrimonio-total').innerHTML = 'R$ ' + intPart.toLocaleString('pt-BR') + '<span class="cents">,' + cent + '</span>';
   $('meta-ativos').textContent = state.classes.reduce((s, c) => s + (hasAssets(c) ? c.assets.length : 0), 0);
   const term = portfolioTermometro();
@@ -741,6 +883,19 @@ function renderReady() {
   const cashErr = r.errors.find((e) => e.code.startsWith('caixa') || e.code === 'sem_caixa');
   items.push(cashErr ? { k: 'bad', t: esc(cashErr.msg) + ' <button class="link-btn act" data-goto="config">Ajustar</button>' } : { k: 'ok', t: `Caixa de Oportunidade: <b>${esc(state.classes.find((c) => c.isCash)?.name || '')}</b>.` });
   r.errors.filter((e) => e.code === 'sem_cambio').forEach((e) => items.push({ k: 'bad', t: esc(e.msg) }));
+  const dupes = [], invalid = [];
+  state.classes.forEach((c) => {
+    if (!hasAssets(c)) return;
+    const seen = new Set();
+    c.assets.forEach((a) => {
+      const t = normTicker(a.ticker);
+      if (!t) return;
+      if (seen.has(t)) dupes.push(`${t} (${c.name})`); seen.add(t);
+      if (quoteSource(c) !== 'none' && !isQuotableTicker(t)) invalid.push(t);
+    });
+  });
+  if (dupes.length) items.push({ k: 'warn', t: `Ticker repetido na mesma classe: <b>${dupes.map(esc).join(', ')}</b> — junte em uma linha só. <button class="link-btn act" data-goto="ativos">Ver em Ativos</button>` });
+  if (invalid.length) items.push({ k: 'warn', t: `Ticker inválido (use só letras e números, sem espaços): <b>${invalid.map(esc).join(', ')}</b>. <button class="link-btn act" data-goto="ativos">Corrigir</button>` });
   if (r.needPrice > 0) {
     if (!r.missing.length) items.push({ k: 'ok', t: `Todos os <b>${r.priced}</b> ativos com preço${newestQuoteTime() ? ` (cotações ${ago(newestQuoteTime())})` : ''}.` });
     else items.push({ k: 'warn', t: `<b>${r.missing.length}</b> de ${r.needPrice} ativos sem preço — eles ficam fora da compra e a parte deles vai para os outros ativos da classe (ou para o Caixa). <button class="link-btn act" data-refresh="1">Atualizar cotações</button> <button class="link-btn act" data-goto="ativos">Ver em Ativos</button><div class="tick-list">${r.missing.map((t) => `<span>${esc(t)}</span>`).join('')}</div>` });
@@ -749,14 +904,34 @@ function renderReady() {
   $('ready-card').querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.goto)));
   $('ready-card').querySelectorAll('[data-refresh]').forEach((b) => b.addEventListener('click', () => refreshQuotes({ silent: false })));
 }
-function renderAporteTab() { renderReady(); if (lastPlan) renderResultado(); }
+function renderAporteTab() { renderReady(); if (!invalidatePlanIfStale() && lastPlan) renderResultado(); }
+
+/** A ordem calculada só vale para a carteira e as cotações daquele momento. */
+function planIsCurrent() {
+  if (!lastPlan || !state) return false;
+  if (Date.now() - lastPlan.at > 30 * 60 * 1000) return false;
+  try { return lastPlan.plan.sig === stateSignature(state, market()); } catch { return false; }
+}
+function invalidatePlanIfStale() {
+  if (!lastPlan || planIsCurrent()) return false;
+  const old = Date.now() - lastPlan.at > 30 * 60 * 1000;
+  lastPlan = null;
+  const cont = $('resultado-container');
+  if (cont) cont.innerHTML = `<div class="msg-box warn">${old ? 'Este cálculo tem mais de 30 minutos.' : 'A carteira ou as cotações mudaram depois do cálculo.'} Calcule de novo para ver a ordem atualizada.</div>`;
+  return true;
+}
 
 function calcular() {
-  const valor = parseNum($('aporte-valor').value);
   const cont = $('resultado-container');
   lastPlan = null;
-  if (!(valor > 0)) { cont.innerHTML = '<div class="msg-box err">Informe um valor de aporte maior que zero.</div>'; $('aporte-valor').focus(); return; }
-  if (valor > 100000000) { cont.innerHTML = '<div class="msg-box err">Valor alto demais — confira se digitou certo.</div>'; return; }
+  const r = readField($('aporte-valor'), { label: 'Valor do aporte', max: 100000000, allowEmpty: false });
+  if (!r.ok) {
+    const tooBig = /máximo/.test(r.msg);
+    cont.innerHTML = `<div class="msg-box err">${tooBig ? 'Valor alto demais — confira se digitou certo (máximo R$ 100 milhões).' : /negativo|preencha/.test(r.msg) ? 'Informe um valor de aporte maior que zero.' : esc(r.msg)}</div>`;
+    $('aporte-valor').focus(); return;
+  }
+  const valor = r.value;
+  if (!(toCents(valor) > 0)) { cont.innerHTML = '<div class="msg-box err">Informe um valor de aporte maior que zero.</div>'; $('aporte-valor').focus(); return; }
   let plan;
   try { plan = planAporte(state, valor, market()); } catch (e) {
     console.error(e);
@@ -767,21 +942,25 @@ function calcular() {
     cont.innerHTML = `<div class="msg-box err"><h3>Corrija antes de calcular</h3><ul>${plan.errors.map((e) => `<li>${esc(e.msg)}</li>`).join('')}</ul></div>`;
     return;
   }
-  lastPlan = { plan, valor, obs: $('aporte-obs').value.trim(), at: Date.now() };
+  lastPlan = { plan, valor, at: Date.now(), whileRefreshing: quotesRefreshing };
   renderResultado();
   cont.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function orderLines(plan) {
   const lines = [];
-  plan.orders.forEach((o) => {
-    if (o.mode === 'lote') lines.push(`Comprar ${o.qty} ${o.ticker} a ${priceTxt(o.price, o.currency)} = ${moneyC(o.valueNative, o.currency)}`);
-    else if (o.mode === 'fracao') lines.push(`Comprar ${moneyC(o.valueNative, o.currency)} de ${o.ticker} (≈ ${qtyTxt(o.qty, 'fracao')})`);
-    else lines.push(`Aplicar ${moneyC(o.valueNative, o.currency)} em ${o.ticker}`);
-  });
-  plan.classes.filter((c) => c.directBRL > 0 && !c.isCash).forEach((c) => lines.push(`Reservar ${moneyC(c.directNative, c.currency)} em ${c.name}`));
+  const group = (title, list, fmt) => { if (!list.length) return; lines.push('', title); list.forEach((o) => lines.push('• ' + fmt(o))); };
+  const ex = (o) => (o.currency !== 'BRL' ? ` (≈ ${moneyC(o.valueBRL)})` : '');
+  group('BOLSA (cotas inteiras)', plan.orders.filter((o) => o.mode === 'lote'),
+    (o) => `Comprar ${o.qty} ${o.ticker} a ${priceTxt(o.price, o.currency)} = ${moneyC(o.valueNative, o.currency)}${ex(o)}`);
+  group('EXTERIOR (valor exato)', plan.orders.filter((o) => o.mode === 'fracao' && o.classType === 'exterior'),
+    (o) => `Comprar ${moneyC(o.valueNative, o.currency)} de ${o.ticker} (≈ ${qtyTxt(o.qty, 'fracao')})${ex(o)}`);
+  group('CRIPTO (valor exato)', plan.orders.filter((o) => o.mode === 'fracao' && o.classType !== 'exterior'),
+    (o) => `Comprar ${moneyC(o.valueNative, o.currency)} de ${o.ticker} (≈ ${qtyTxt(o.qty, 'fracao')})`);
+  group('RENDA FIXA', plan.orders.filter((o) => o.mode === 'valor'), (o) => `Aplicar ${moneyC(o.valueNative, o.currency)} em ${o.ticker}${ex(o)}`);
+  group('RESERVAR', plan.classes.filter((c) => c.directBRL > 0 && !c.isCash), (c) => `${moneyC(c.directNative, c.currency)} em ${c.name}`);
   const cash = plan.toCash + plan.cashDirect;
-  if (cash > 0) lines.push(`Caixa de Oportunidade: ${moneyC(cash)}`);
+  if (cash > 0) lines.push('', `CAIXA DE OPORTUNIDADE: ${moneyC(cash)}${plan.cashDirect && plan.toCash ? ` (${moneyC(plan.cashDirect)} do plano + ${moneyC(plan.toCash)} de sobras)` : ''}`);
   return lines;
 }
 
@@ -795,7 +974,9 @@ function renderResultado() {
   const src = (o) => `<span class="src-pill ${o.priceSource}">${{ auto: 'auto', cache: 'última', manual: 'manual', none: '' }[o.priceSource] || ''}</span>`;
   const row = (left, sub, right, badge = '') => `<div class="order-item"><div class="oi-left"><div><div class="oi-ticker">${left}${badge}</div>${sub ? `<div class="oi-sub">${sub}</div>` : ''}</div></div><div class="oi-right"><div class="oi-val">${right}</div></div></div>`;
   let html = '';
-  if (plan.warnings.length) html += `<div class="msg-box warn"><h3>Atenção</h3><ul>${plan.warnings.map((w) => `<li>${esc(w.msg)}</li>`).join('')}</ul></div>`;
+  const warns = plan.warnings.map((w) => w.msg);
+  if (lastPlan.whileRefreshing) warns.push('As cotações ainda estavam sendo atualizadas quando você calculou. Se algum preço mudar, esta ordem é cancelada e o app pede um novo cálculo.');
+  if (warns.length) html += `<div class="msg-box warn"><h3>Atenção</h3><ul>${warns.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>`;
   html += '<div class="order-card"><div class="order-title">🧾 Ordem de compra sugerida</div>';
   if (lote.length) html += `<div class="order-section-title">Comprar na bolsa (cotas inteiras)</div><div class="order-list">${lote.map((o) => row(`<span class="oi-qty" style="min-width:0; margin-right:8px;">${o.qty}×</span>${esc(o.ticker)}`, `${esc(o.className)} · ${priceTxt(o.price, o.currency)}${src(o)}${o.complemento ? ' · com a sobra' : ''}`, moneyC(o.valueNative, o.currency) + (o.currency !== 'BRL' ? `<div class="oi-sub">≈ ${moneyC(o.valueBRL)}</div>` : ''), ` <span class="priority-badge ${o.priority >= 70 ? '' : o.priority >= 40 ? 'mid' : 'low'}" title="Distância da meta: 100 = o mais longe da classe">prior. ${o.priority}</span>`)).join('')}</div>`;
   if (frac.length) html += `<div class="order-section-title">Comprar valor exato</div><div class="order-list">${frac.map((o) => row(esc(o.ticker), `${esc(o.className)} · ≈ ${qtyTxt(o.qty, 'fracao')} a ${priceTxt(o.price, o.currency)}${src(o)}`, moneyC(o.valueNative, o.currency) + (o.currency !== 'BRL' ? `<div class="oi-sub">≈ ${moneyC(o.valueBRL)}</div>` : ''))).join('')}</div>`;
@@ -809,7 +990,7 @@ function renderResultado() {
     <div><div class="k">Aporte</div><div class="v">${moneyC(plan.aporte)}</div></div>
     <div><div class="k">Comprado / aplicado</div><div class="v">${moneyC(plan.investedBRL + plan.directBRL - plan.cashDirect)}</div></div>
     <div><div class="k">Para o Caixa</div><div class="v" style="color:var(--brass)">${moneyC(cashTotal)}</div></div>
-    <div><div class="k">Alinhamento</div><div class="align-compare"><span>${pct1(plan.before)}%</span><span class="align-arrow">→</span><span class="align-after">${pct1(plan.after)}%</span></div></div>
+    <div><div class="k">Alinhamento</div><div class="align-compare"><span>${plan.before === null ? '—' : pct1(plan.before) + '%'}</span><span class="align-arrow">→</span><span class="align-after">${pct1(plan.after)}%</span></div></div>
   </div>
   <div class="order-footer2"><div class="order-actions"><button class="btn" id="btn-copy-order">Copiar ordem</button></div><button class="btn btn-primary" id="btn-registrar">Registrar este aporte</button></div></div>`;
   html += plan.classes.map((c) => {
@@ -830,55 +1011,87 @@ function renderResultado() {
             <div class="asset-suggest ${it.value > 0 ? '' : 'zero'}">${moneyC(it.value, c.currency)}</div></div>`;
         }).join('');
     } else body = `<div class="caixa-note">${c.isCash ? 'Sua reserva de Caixa de Oportunidade — recebe a parte do plano e as sobras.' : 'Classe de valor direto — o valor entra direto no saldo dela.'}</div>`;
-    return `<div class="result-class"><div class="result-class-head" data-toggle="${esc(c.classId)}"><div class="rc-left"><div class="rc-name"><span class="swatch" style="display:inline-block; background:${classColor(idx)}; margin-right:8px;"></span>${esc(c.name)}</div>
+    return `<div class="result-class"><div class="result-class-head" data-toggle="${esc(c.classId)}" role="button" tabindex="0" aria-expanded="false"><div class="rc-left"><div class="rc-name"><span class="swatch" style="display:inline-block; background:${classColor(idx)}; margin-right:8px;"></span>${esc(c.name)}</div>
       <div class="rc-bar-wrap"><div class="ledger-bar"><div class="ledger-bar-fill ${curPct >= c.idealPct ? 'over' : 'under'}" style="width:${Math.min(100, curPct)}%"></div><div class="ledger-bar-target" style="left:${Math.min(100, c.idealPct)}%"></div></div><div class="rc-pcts">atual ${pct1(curPct)}% · ideal ${pct(c.idealPct)}%</div></div></div>
       <div class="rc-right"><div class="rc-aporte"><div class="k">Recebe</div><div class="v ${c.allocBRL > 0 ? '' : 'zero'}">${moneyC(c.allocBRL)}</div></div><div class="chev">▸</div></div></div>
       <div class="result-class-body">${body}</div></div>`;
   }).join('');
   cont.innerHTML = html;
-  cont.querySelectorAll('[data-toggle]').forEach((h) => h.addEventListener('click', () => { h.nextElementSibling.classList.toggle('open'); h.querySelector('.chev').classList.toggle('open'); }));
+  cont.querySelectorAll('[data-toggle]').forEach((h) => {
+    const toggle = () => { const open = h.nextElementSibling.classList.toggle('open'); h.querySelector('.chev').classList.toggle('open', open); h.setAttribute('aria-expanded', open ? 'true' : 'false'); };
+    h.addEventListener('click', toggle);
+    h.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  });
   $('btn-registrar').addEventListener('click', registrarAporte);
   $('btn-copy-order').addEventListener('click', async () => {
-    const txt = `Aporte+ — ordem de ${fmtDateBR(todayISO())}\nAporte: ${moneyC(plan.aporte)}\n\n` + orderLines(plan).join('\n');
+    const txt = `Aporte+ — ordem de ${fmtDateBR(todayISO())}\nAporte: ${moneyC(plan.aporte)}\n` + orderLines(plan).join('\n');
     try { await navigator.clipboard.writeText(txt); toast('Ordem copiada.'); } catch { dialog({ title: 'Copiar ordem', html: `<textarea style="width:100%; height:200px; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:IBM Plex Mono, monospace; font-size:12px;">${esc(txt)}</textarea>` }); }
   });
 }
 
+let registering = false;
 async function registrarAporte() {
+  if (registering) return;
   if (!lastPlan) return;
-  const { plan, obs } = lastPlan;
-  if (Date.now() - lastPlan.at > 30 * 60 * 1000) { toast('Este cálculo tem mais de 30 minutos. Calcule de novo antes de registrar.'); return; }
-  const ok = await confirmBox('Registrar aporte?', `Vou somar à sua carteira as compras desta ordem (${moneyC(plan.aporte)}). Faça as compras na sua corretora. Se precisar, dá para desfazer depois em Histórico.`, 'Registrar');
-  if (!ok) return;
+  if (conflict) { dialog({ title: 'Não dá para registrar agora', html: '<p>A carteira foi alterada em outro aparelho e esta tela não está salvando. Recarregue para pegar a versão mais recente (veja o aviso no topo) e calcule de novo.</p>' }); return; }
+  if (invalidatePlanIfStale()) return;
+  const { plan } = lastPlan;
+  registering = true;
   try {
-    const prev = JSON.parse(JSON.stringify({ ...state, undo: undefined }));
-    const { state: next, record } = applyPlan(state, plan, market(), { date: todayISO(), obs });
-    next.undo = { kind: 'aporte', aporteId: record.id, at: new Date().toISOString(), label: 'aporte de ' + moneyC(plan.aporte), prev, after: -1 };
-    state = next;
+    const ok = await confirmBox('Registrar aporte?', `Vou somar à sua carteira as compras desta ordem (${moneyC(plan.aporte)}). Faça as compras na sua corretora. Se precisar, dá para desfazer depois em Histórico.`, 'Registrar');
+    if (!ok) return;
+    if (invalidatePlanIfStale()) return; // algo mudou enquanto a confirmação estava aberta
+    const obs = $('aporte-obs').value.trim(); // a observação vale como está agora (pode ter sido digitada depois do cálculo)
+    let res;
+    try { res = applyPlan(state, plan, market(), { date: todayISO(), obs }); } catch (e) {
+      console.error(e);
+      lastPlan = null; $('resultado-container').innerHTML = '';
+      dialog({ title: 'Não registrado', html: `<p>Nada foi alterado. Motivo: ${esc(e.message)}</p>` });
+      return;
+    }
+    state = res.state;
     lastPlan = null;
     $('aporte-valor').value = ''; $('aporte-obs').value = '';
     $('resultado-container').innerHTML = '';
-    scheduleSave();
+    dirty = true; editGen++;
     renderTopbar(); renderReady();
-    toast(`Aporte registrado! Patrimônio: ${money(portfolioTotalBRL(state, quotes, fxCtx()))}.`, { action: { label: 'Desfazer', run: undoLast } });
-  } catch (e) {
-    console.error(e);
-    dialog({ title: 'Não registrado', html: `<p>Nada foi alterado. Motivo: ${esc(e.message)}</p>` });
+    toast('Aporte registrado. Salvando na nuvem…', { ms: 20000 });
+    const saved = await flushSave();
+    if (reportSave(saved, 'Aporte registrado')) {
+      toast(`Aporte registrado e salvo! Patrimônio: ${money(portfolioTotalBRL(state, quotes, fxCtx()))}.`, { action: { label: 'Desfazer', run: () => undoAporte(res.record.id) } });
+    } else $('toast').classList.remove('show');
+  } finally { registering = false; }
+}
+
+/** Desfaz um aporte: tira exatamente o que ele somou. O que foi feito depois continua. */
+async function undoAporte(aporteId) {
+  const rec = state?.aportes?.find((a) => a.id === aporteId);
+  if (!rec) { toast('Este aporte não existe mais.'); return; }
+  if (!Array.isArray(rec.deltas)) { dialog({ title: 'Não dá para desfazer automaticamente', html: '<p>Este aporte foi registrado numa versão antiga do app, que não guardava o detalhe do que foi somado. Ajuste as quantidades em Ativos, se precisar.</p>' }); return; }
+  const curOf = (d) => { const c = state.classes.find((x) => x.id === d.classId); return c ? classCurrency(c) : 'BRL'; };
+  const parts = rec.deltas.map((d) => (d.field === 'qty' ? (Number.isInteger(d.amount) ? `${qtyTxt(d.amount, 'lote')}× ${esc(d.label)}` : `${qtyTxt(d.amount, 'fracao')} de ${esc(d.label)}`) : `${money(d.amount, curOf(d))} em ${esc(d.label)}`));
+  const ok = await confirmBox('Desfazer este aporte?', `Aporte de <b>${money(Number(rec.disponivel) || 0)}</b> em ${fmtDateBR(rec.date)}. Vou tirar da carteira exatamente o que ele somou:<br><span style="font-size:12px; color:var(--text-muted);">${parts.join(' · ')}</span><br><br>O que você fez depois (proventos, outras edições) continua como está.`, 'Desfazer aporte');
+  if (!ok) return;
+  let res;
+  try { res = revertAporte(state, aporteId); } catch (e) { dialog({ title: 'Não foi possível desfazer', html: `<p>${esc(e.message)}</p>` }); return; }
+  state = res.state;
+  dirty = true; editGen++;
+  renderTopbar(); switchTab(activeTab);
+  const notes = [];
+  if (res.missing.length) notes.push(`Não existem mais e ficaram como estão: ${res.missing.map(esc).join(', ')}.`);
+  if (res.clamped.length) notes.push(`Já tinham menos do que o aporte somou e ficaram em zero: ${res.clamped.map(esc).join(', ')}. Confira em Ativos.`);
+  const saved = await flushSave();
+  if (reportSave(saved, 'Aporte desfeito')) {
+    if (notes.length) dialog({ title: 'Aporte desfeito — confira', html: `<p>${notes.join('</p><p>')}</p>` });
+    else toast('Aporte desfeito e salvo.');
   }
 }
 
-async function undoLast() {
-  const u = state?.undo;
-  if (!u || !u.prev) { toast('Não há nada para desfazer.'); return; }
-  const later = Number(u.after) > 0 ? '<br><br><b>Atenção:</b> as alterações que você fez depois disso também serão desfeitas.' : '';
-  const ok = await confirmBox('Desfazer?', `Isso volta a carteira para como estava antes do ${esc(u.label || 'último registro')}.${later}`, 'Desfazer');
-  if (!ok) return;
-  state = migrateState(u.prev);
-  state.undo = null;
-  scheduleSave();
-  renderTopbar();
-  switchTab(activeTab);
-  toast('Desfeito.');
+/** Desfazer rápido de remoções (só nesta tela, logo depois de remover). */
+function offerSessionUndo(label, run) {
+  const token = {};
+  sessionUndo = token;
+  toast(`${label}.`, { action: { label: 'Desfazer', run: () => { if (sessionUndo !== token) { toast('Não dá mais para desfazer.'); return; } sessionUndo = null; run(); } } });
 }
 
 // ---------------------------------------------------------------------
@@ -892,18 +1105,24 @@ function quoteHint(c, a) {
   const p = assetPrice(c, a, quotes);
   const t = normTicker(a.ticker);
   if (!t) return '<span class="warn-txt">Digite o ticker.</span>';
-  if (q && q.currency !== classCurrency(c)) return `<span class="bad-txt">A cotação de ${esc(t)} veio em ${esc(q.currency)}, diferente da classe (${classCurrency(c)}). Confira o tipo da classe.</span>`;
-  const qTxt = q ? `Cotação ${priceTxt(q.price, q.currency)} · ${ago(q.updated_at)}${q.change_percent != null ? ` · ${q.change_percent >= 0 ? '+' : ''}${pct(q.change_percent)}% no dia` : ''}` : '';
-  if (p.source === 'manual') return `Usando o preço digitado.${q ? ` ${qTxt} · <button class="link-btn" data-action="auto-price">usar automático</button>` : ''}`;
+  if (!isQuotableTicker(t)) return `<span class="bad-txt">"${esc(t)}" não é um ticker válido — use só letras e números, sem espaços (ex.: PETR4).</span>`;
+  if (c.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === t)) return `<span class="bad-txt">${esc(t)} aparece duas vezes nesta classe — junte as quantidades em uma linha só e remova a outra.</span>`;
+  const qFailed = q && q.currency === 'ERR';
+  if (q && !qFailed && q.currency !== classCurrency(c)) return `<span class="bad-txt">A cotação de ${esc(t)} veio em ${esc(q.currency)}, diferente da classe (${classCurrency(c)}). Confira o tipo da classe.</span>`;
+  const qTxt = q && !qFailed ? `Cotação ${priceTxt(q.price, q.currency)} · ${ago(q.updated_at)}${q.change_percent != null ? ` · ${q.change_percent >= 0 ? '+' : ''}${pct(q.change_percent)}% no dia` : ''}` : '';
+  if (p.source === 'manual') return `Usando o preço digitado.${qTxt ? ` ${qTxt} · <button class="link-btn" data-action="auto-price">usar automático</button>` : ''}`;
   if (p.source === 'auto') return qTxt;
   const ch = TICKER_CHANGES[t];
-  if (ch && !q) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-to="${esc(ch.to)}">Trocar para ${esc(ch.to)}</button> <span>· se você tinha cotas, confira na corretora a quantidade convertida.</span>`;
-  if (failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>`;
+  if (ch && (!q || qFailed)) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-to="${esc(ch.to)}">Trocar para ${esc(ch.to)}</button> <span>· se você tinha cotas, confira na corretora a quantidade convertida.</span>`;
+  if (qFailed || failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ' <span class="warn-txt">Usando o último preço conhecido.</span>' : ''}`;
   if (p.source === 'cache') return '<span class="warn-txt">Sem cotação agora — usando o último preço conhecido.</span>';
-  return quotesRefreshing ? 'Buscando cotação…' : '<span class="warn-txt">Sem cotação ainda. Toque em "Atualizar cotações agora" ou digite o preço.</span>';
+  const oldPrice = a.priceMode === 'auto' && Number(a.price) > 0 ? cleanPrice(c, a.price) : 0;
+  const useOld = oldPrice > 0 ? ` <button class="link-btn" data-action="use-old-price">usar o preço digitado antes (${priceTxt(oldPrice, classCurrency(c))})</button>` : '';
+  return (quotesRefreshing ? 'Buscando cotação…' : '<span class="warn-txt">Sem cotação ainda. Toque em "Atualizar cotações agora" ou digite o preço.</span>') + useOld;
 }
 
 function renderAtivos() {
+  pendingRender.delete('asset-list');
   const tabs = $('ativos-class-tabs');
   const assetClasses = state.classes.filter((c) => hasAssets(c));
   if (!assetClasses.find((c) => c.id === activeAtivosClassId)) activeAtivosClassId = assetClasses[0]?.id || null;
@@ -916,6 +1135,7 @@ function renderAtivos() {
   const mode = buyMode(cls);
   const cur = classCurrency(cls);
   const usd = cur === 'USD' ? 'usd' : '';
+  const again = () => rerenderKeepFocus(() => { renderAtivos(); renderTopbar(); });
   list.innerHTML = cls.assets.length ? '' : `<div class="empty-state">Nenhum ativo em ${esc(cls.name)} ainda.</div>`;
   cls.assets.forEach((a) => {
     const card = document.createElement('div');
@@ -924,45 +1144,51 @@ function renderAtivos() {
     const auto = isAutoValued(cls, a, quotes);
     const val = assetValue(cls, a, quotes);
     const tl = termLabel(a.termometro.nota);
+    const k = (f) => `data-f="${f}" data-key="${esc(a.id)}:${f}"`;
     const qtyVal = Number(a.qty) > 0 ? Number(a.qty).toLocaleString('pt-BR', { maximumFractionDigits: 8, useGrouping: false }) : '0';
-    let fields = `<div class="field ticker"><label>${mode === 'valor' ? 'Ativo / título' : 'Ticker'}</label><input class="name-input" value="${esc(a.ticker)}" data-f="ticker" ${mode === 'valor' ? '' : 'style="text-transform:uppercase"'} maxlength="40" autocomplete="off" spellcheck="false"></div>
-      <div class="field pct"><label title="Percentual ideal dentro da classe">% ideal</label><div class="pct-input-wrap"><input class="pct-input" inputmode="decimal" value="${pct(a.idealPct)}" data-f="idealPct"></div></div>`;
+    let fields = `<div class="field ticker"><label>${mode === 'valor' ? 'Ativo / título' : 'Ticker'}</label><input class="name-input" value="${esc(a.ticker)}" ${k('ticker')} ${mode === 'valor' ? '' : 'style="text-transform:uppercase"'} maxlength="40" autocomplete="off" spellcheck="false"></div>
+      <div class="field pct"><label title="Percentual ideal dentro da classe">% ideal</label><div class="pct-input-wrap"><input class="pct-input" inputmode="decimal" value="${pct(a.idealPct)}" ${k('idealPct')}></div></div>`;
     if (mode === 'valor') {
-      fields += `<div class="field val"><label>Valor aplicado</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(a.currentValue)}" data-f="currentValue"></div></div>
-        <div class="field val"><label title="Menor valor que a aplicação aceita (ex.: Tesouro ≈ R$ 30)">Aplicação mín.</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(a.minAmount || 0)}" data-f="minAmount"></div></div>`;
+      fields += `<div class="field val"><label>Valor aplicado</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(a.currentValue)}" ${k('currentValue')}></div></div>
+        <div class="field val"><label title="Menor valor que a aplicação aceita (ex.: Tesouro ≈ R$ 30)">Aplicação mín.</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(a.minAmount || 0)}" ${k('minAmount')}></div></div>`;
     } else {
-      fields += `<div class="field small"><label>Quantidade</label><input class="plain-input" inputmode="decimal" value="${qtyVal}" data-f="qty" title="Quantas cotas/unidades você tem. Deixe 0 para digitar o valor."></div>
-        <div class="field val"><label>Preço <span class="src-pill ${p.source}">${{ auto: 'auto', cache: 'última', manual: 'manual', none: 'sem' }[p.source]}</span></label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${p.price > 0 ? n2(p.price) : ''}" placeholder="—" data-f="price"></div></div>
-        <div class="field val"><label>${auto ? 'Valor <span class="auto-pill">· auto</span>' : 'Valor atual'}</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(val)}" data-f="currentValue" ${auto ? 'disabled title="Calculado: quantidade × preço"' : ''}></div></div>`;
-      if (mode === 'lote') fields += `<div class="field small"><label title="Cotas por lote (1 no fracionário)">Lote</label><input class="plain-input" inputmode="numeric" value="${a.minQty}" data-f="minQty"></div>`;
-      else fields += `<div class="field val"><label title="Menor compra aceita pela corretora">Compra mín.</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(a.minAmount || 0)}" data-f="minAmount"></div></div>`;
+      fields += `<div class="field small"><label>Quantidade</label><input class="plain-input" inputmode="decimal" value="${qtyVal}" ${k('qty')} title="Quantas cotas/unidades você tem. Deixe 0 para digitar o valor."></div>
+        <div class="field val"><label>Preço <span class="src-pill ${p.source}">${{ auto: 'auto', cache: 'última', manual: 'manual', none: 'sem' }[p.source]}</span></label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${p.price > 0 ? (p.price < 1 ? p.price.toLocaleString('pt-BR', { maximumFractionDigits: 8 }) : n2(p.price)) : ''}" placeholder="—" ${k('price')}></div></div>
+        <div class="field val"><label>${auto ? 'Valor <span class="auto-pill">· auto</span>' : 'Valor atual'}</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(val)}" ${k('currentValue')} ${auto ? 'disabled title="Calculado: quantidade × preço"' : ''}></div></div>`;
+      if (mode === 'lote') fields += `<div class="field small"><label title="Cotas por lote (1 no fracionário)">Lote</label><input class="plain-input" inputmode="numeric" value="${a.minQty}" ${k('minQty')}></div>`;
+      else fields += `<div class="field val"><label title="Menor compra aceita pela corretora (o app nunca sugere menos de 1,00)">Compra mín.</label><div class="value-input-wrap ${usd}"><input class="value-input" inputmode="decimal" value="${n2(a.minAmount || 0)}" ${k('minAmount')}></div></div>`;
     }
     const s = sentimentCache[normTicker(a.ticker)];
+    const termOpen = openTermPanels.has(a.id);
     card.innerHTML = `<div class="asset-card-main">${fields}
-        <button class="term-toggle" data-action="toggle-term"><span class="term-dot" style="background:${tl.color}"></span>${a.termometro.nota === null ? 'Termômetro' : esc(a.termometro.nota) + '/100'}</button>${s ? `<span class="mini-sentiment ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span>` : ''}
-        <div class="asset-card-actions"><button class="icon-btn" data-action="remove" title="Remover ativo" aria-label="Remover ${esc(a.ticker)}">✕</button></div>
+        <button class="term-toggle" data-action="toggle-term" aria-expanded="${termOpen}"><span class="term-dot" style="background:${tl.color}"></span>${a.termometro.nota === null ? 'Termômetro' : esc(a.termometro.nota) + '/100'}</button>${s ? `<span class="mini-sentiment ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span>` : ''}
+        <div class="asset-card-actions"><button class="icon-btn" data-action="remove" title="Remover ativo" aria-label="Remover ${esc(a.ticker || 'ativo')}">✕</button></div>
         <div class="asset-hint-row">${quoteHint(cls, a)}</div>
       </div>
-      <div class="term-panel" data-term-panel>
-        <div class="term-panel-row"><div class="field small"><label>Nota (0-100)</label><input class="plain-input" style="width:80px;" inputmode="numeric" value="${a.termometro.nota === null ? '' : esc(a.termometro.nota)}" data-f="nota" placeholder="—"></div><div style="font-size:12px; color:${tl.color}; font-weight:600;">${tl.label}</div></div>
+      <div class="term-panel ${termOpen ? 'open' : ''}" data-term-panel>
+        <div class="term-panel-row"><div class="field small"><label>Nota (0-100)</label><input class="plain-input" style="width:80px;" inputmode="numeric" value="${a.termometro.nota === null ? '' : esc(a.termometro.nota)}" ${k('nota')} placeholder="—"></div><div style="font-size:12px; color:${tl.color}; font-weight:600;">${tl.label}</div></div>
         <div data-motivos></div>
         <button class="btn btn-sm btn-ghost" data-action="add-motivo">+ Adicionar motivo</button>
         <div class="sentiment-box" style="margin-top:16px;"><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); margin-bottom:8px;">Leitura automática de notícias</div>${renderSentimentBox(a.ticker)}</div>
       </div>`;
     const on = (f, ev, fn) => { const el = card.querySelector(`[data-f="${f}"]`); if (el) el.addEventListener(ev, fn); };
-    on('ticker', 'change', (e) => { a.ticker = mode === 'valor' ? e.target.value.trim() : normTicker(e.target.value); scheduleSave(); renderAtivos(); renderTopbar(); if (mode !== 'valor') debounceQuoteRefresh(); });
-    on('idealPct', 'change', (e) => { a.idealPct = Math.max(0, Math.min(100, parseNum(e.target.value))); scheduleSave(); renderAtivos(); });
-    on('currentValue', 'change', (e) => { a.currentValue = Math.max(0, parseNum(e.target.value)); scheduleSave(); renderAtivos(); renderTopbar(); });
-    on('minAmount', 'change', (e) => { a.minAmount = Math.max(0, parseNum(e.target.value)); scheduleSave(); renderAtivos(); });
-    on('qty', 'change', (e) => { a.qty = Math.max(0, parseNum(e.target.value)); scheduleSave(); renderAtivos(); renderTopbar(); });
-    on('price', 'change', (e) => {
-      const v = Math.max(0, parseNum(e.target.value));
-      if (v > 0) { a.price = v; a.priceMode = 'manual'; } else { a.price = 0; a.priceMode = 'auto'; }
-      scheduleSave(); renderAtivos(); renderTopbar();
+    const field = (f, opts, apply) => on(f, 'change', (e) => { if (fieldOr(e.target, opts, apply)) scheduleSave(); again(); });
+    on('ticker', 'change', (e) => {
+      const v = mode === 'valor' ? e.target.value.trim().slice(0, 40) : normTicker(e.target.value).replace(/\s+/g, '');
+      a.ticker = v; scheduleSave(); again(); if (mode !== 'valor') debounceQuoteRefresh();
     });
-    on('minQty', 'change', (e) => { a.minQty = Math.max(1, Math.round(parseNum(e.target.value)) || 1); scheduleSave(); renderAtivos(); });
-    on('nota', 'change', (e) => { const v = e.target.value.trim(); a.termometro.nota = v === '' ? null : Math.max(0, Math.min(100, Math.round(parseNum(v)))); scheduleSave(); renderAtivos(); renderTopbar(); });
-    card.querySelector('[data-action="auto-price"]')?.addEventListener('click', () => { a.priceMode = 'auto'; scheduleSave(); renderAtivos(); renderTopbar(); });
+    field('idealPct', { label: '% ideal', max: 100 }, (r) => { a.idealPct = r.value; });
+    field('currentValue', { label: 'Valor', max: 1e11 }, (r) => { a.currentValue = round2(r.value); });
+    field('minAmount', { label: 'Mínimo', max: 1e9 }, (r) => { a.minAmount = round2(r.value); });
+    field('qty', { label: 'Quantidade', max: 1e12 }, (r) => { a.qty = r.value; });
+    field('price', { label: 'Preço', max: 1e9 }, (r) => {
+      const v = cleanPrice(cls, r.value);
+      if (!r.empty && r.value > 0 && v > 0) { a.price = v; a.priceMode = 'manual'; } else { a.price = 0; a.priceMode = 'auto'; }
+    });
+    field('minQty', { label: 'Lote', min: 1, max: 1e6, int: true, allowEmpty: false }, (r) => { a.minQty = r.value; });
+    field('nota', { label: 'Nota do termômetro', max: 100, int: true }, (r) => { a.termometro.nota = r.empty ? null : r.value; });
+    card.querySelector('[data-action="auto-price"]')?.addEventListener('click', () => { a.priceMode = 'auto'; scheduleSave(); again(); });
+    card.querySelector('[data-action="use-old-price"]')?.addEventListener('click', () => { a.price = cleanPrice(cls, a.price); a.priceMode = 'manual'; scheduleSave(); again(); toast('Usando o preço digitado. Confira se ele ainda vale.'); });
     card.querySelector('[data-action="rename"]')?.addEventListener('click', (e) => {
       const to = e.currentTarget.dataset.to;
       if (cls.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === to)) { toast(`${to} já está nesta classe.`); return; }
@@ -970,24 +1196,41 @@ function renderAtivos() {
       scheduleSave(); renderAtivos(); renderTopbar(); debounceQuoteRefresh();
       toast(`Trocado para ${to}. Buscando a cotação…`);
     });
-    card.querySelector('[data-action="toggle-term"]').addEventListener('click', () => card.querySelector('[data-term-panel]').classList.toggle('open'));
+    card.querySelector('[data-action="toggle-term"]').addEventListener('click', (e) => {
+      const open = card.querySelector('[data-term-panel]').classList.toggle('open');
+      if (open) openTermPanels.add(a.id); else openTermPanels.delete(a.id);
+      e.currentTarget.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
     card.querySelector('[data-action="remove"]').addEventListener('click', async () => {
       if (!(await confirmBox('Remover ativo?', `Remover <b>${esc(a.ticker || 'este ativo')}</b> de ${esc(cls.name)}? O valor dele deixa de contar no patrimônio.`, 'Remover'))) return;
-      cls.assets = cls.assets.filter((x) => x.id !== a.id); scheduleSave(); renderAtivos(); renderTopbar();
+      const idx = cls.assets.findIndex((x) => x.id === a.id);
+      if (idx < 0) return;
+      const removed = cls.assets.splice(idx, 1)[0];
+      scheduleSave(); renderAtivos(); renderTopbar();
+      offerSessionUndo(`${removed.ticker || 'Ativo'} removido`, () => {
+        const c2 = state?.classes.find((x) => x.id === cls.id);
+        if (!c2 || c2.assets.some((x) => x.id === removed.id)) { toast('Não dá mais para desfazer.'); return; }
+        c2.assets.splice(Math.min(idx, c2.assets.length), 0, removed);
+        scheduleSave(); renderAtivos(); renderTopbar(); toast('Ativo de volta.');
+      });
     });
     const renderMotivos = () => {
       const w = card.querySelector('[data-motivos]');
       w.innerHTML = '';
       a.termometro.motivos.forEach((m, i) => {
         const r = document.createElement('div'); r.className = 'motivo-item';
-        r.innerHTML = `<input value="${esc(m)}" maxlength="200"><button class="icon-btn" style="width:28px;height:28px;" aria-label="Remover motivo">✕</button>`;
-        r.querySelector('input').addEventListener('change', (e) => { a.termometro.motivos[i] = e.target.value; scheduleSave(); });
+        r.innerHTML = `<input value="${esc(m)}" maxlength="200" aria-label="Motivo ${i + 1}"><button class="icon-btn" style="width:28px;height:28px;" aria-label="Remover motivo">✕</button>`;
+        r.querySelector('input').addEventListener('change', (e) => { a.termometro.motivos[i] = e.target.value.slice(0, 200); scheduleSave(); });
         r.querySelector('button').addEventListener('click', () => { a.termometro.motivos.splice(i, 1); scheduleSave(); renderMotivos(); });
         w.appendChild(r);
       });
     };
     renderMotivos();
-    card.querySelector('[data-action="add-motivo"]').addEventListener('click', () => { a.termometro.motivos.push(''); scheduleSave(); renderMotivos(); });
+    card.querySelector('[data-action="add-motivo"]').addEventListener('click', () => {
+      if (a.termometro.motivos.length >= 20) { toast('Máximo de 20 motivos.'); return; }
+      a.termometro.motivos.push(''); scheduleSave(); renderMotivos();
+      const ins = card.querySelectorAll('[data-motivos] input'); ins[ins.length - 1]?.focus();
+    });
     list.appendChild(card);
   });
   const sum = sumIdeal(cls.assets);
@@ -1008,55 +1251,130 @@ function debounceQuoteRefresh() { clearTimeout(quoteT); quoteT = setTimeout(() =
 // ---------------------------------------------------------------------
 // Configuração
 // ---------------------------------------------------------------------
+/** Moeda que a classe terá depois de mudar para o tipo `nt`. */
+function currencyForType(cls, nt) {
+  if (nt === 'b3' || nt === 'cripto') return 'BRL';
+  if (nt === 'exterior') return 'USD';
+  return CURRENCIES.includes(cls.currency) ? cls.currency : 'BRL';
+}
+/**
+ * Muda o tipo de uma classe SEM perder valor: o que hoje vale R$ X continua valendo R$ X.
+ * Mostra antes exatamente o que vai acontecer e só aplica se a pessoa confirmar.
+ */
+async function changeClassType(cls, nt) {
+  const ot = classType(cls);
+  if (nt === ot || !CLASS_TYPES[nt]) return false;
+  const fx = fxCtx();
+  const oldCur = classCurrency(cls), newCur = currencyForType(cls, nt);
+  const rOld = fxRate(oldCur, fx), rNew = fxRate(newCur, fx);
+  if (oldCur !== newCur && (rOld === null || rNew === null)) {
+    await dialog({ title: 'Sem câmbio para converter', html: `<p>Mudar para "${esc(CLASS_TYPES[nt].label)}" troca a moeda de ${oldCur} para ${newCur}, e não há cotação de câmbio agora para converter os valores. Informe o câmbio em Configuração → Câmbio e tente de novo.</p>` });
+    return false;
+  }
+  const conv = oldCur === newCur ? 1 : rOld / rNew;
+  const before = classValueBRL(cls, quotes, fx) || 0;
+  const next = JSON.parse(JSON.stringify(cls));
+  next.type = nt; next.hasAssets = CLASS_TYPES[nt].hasAssets; next.currency = newCur;
+  next.fractional = nt === 'cripto' || nt === 'exterior';
+  const notes = [];
+  if (!CLASS_TYPES[nt].hasAssets) {
+    next.currentValue = round2(classValueNative(cls, quotes) * conv);
+    next.assets = [];
+    if (cls.assets.length) notes.push(`Os ${plural(cls.assets.length, 'ativo', 'ativos')} da classe serão removidos (no tipo "Valor direto" a classe não tem ativos). O valor de hoje, ${money(next.currentValue, newCur)}, passa a ser o valor da classe.`);
+  } else if (!hasAssets(cls)) {
+    const v = round2(Math.max(0, Number(cls.currentValue) || 0) * conv);
+    if (v > 0) {
+      next.assets = [{ id: uid(), ticker: nt === 'rendafixa' ? cls.name.slice(0, 40) : '', idealPct: 100, qty: 0, price: 0, priceMode: 'auto', currentValue: v, minQty: 1, minAmount: 0, lastQuotePrice: 0, termometro: { nota: null, motivos: [] } }];
+      notes.push(`O valor atual da classe (${money(v, newCur)}) vira um ativo${nt === 'rendafixa' ? '' : ' sem ticker'} — ajuste o nome e os ativos em Ativos.`);
+    }
+  } else {
+    // cada ativo mantém o valor de hoje; se no tipo novo ele não for calculado por cotas × preço, o valor é guardado
+    next.assets.forEach((a, i) => {
+      const old = assetValue(cls, cls.assets[i], quotes);
+      a.currentValue = round2(old * conv);
+      if (nt === 'rendafixa') { a.qty = Number(a.qty) || 0; }
+      if (oldCur !== newCur && a.priceMode === 'manual') { a.price = 0; a.priceMode = 'auto'; }
+      a.lastQuotePrice = oldCur !== newCur || quoteSource(next) !== quoteSource(cls) ? 0 : a.lastQuotePrice;
+    });
+    if (quoteSource(next) !== quoteSource(cls) && CLASS_TYPES[nt].quote !== 'none') notes.push(`As cotações passam a vir de ${{ b3: 'Bolsa Brasil (B3)', us: 'bolsa dos EUA, em US$', crypto: 'corretoras de cripto' }[CLASS_TYPES[nt].quote]} — confira se os tickers continuam certos.`);
+    if (nt === 'rendafixa') notes.push('Os ativos passam a ser contados pelo valor aplicado (sem cotas): guardo o valor de hoje de cada um.');
+  }
+  if (oldCur !== newCur) notes.push(`A moeda muda de ${oldCur} para ${newCur}; os valores foram convertidos pelo câmbio de hoje.`);
+  const after = classValueBRL(next, quotes, fx) || 0;
+  if (Math.abs(after - before) >= 0.01) notes.push(`O valor da classe muda de ${money(before)} para ${money(after)} — normalmente porque a cotação do tipo novo ainda não chegou. Confira em Ativos depois.`);
+  else notes.push(`O valor da classe continua ${money(before)}.`);
+  const ok = await confirmBox(`Mudar "${esc(cls.name)}" para ${esc(CLASS_TYPES[nt].label)}?`, `<ul style="margin:0; padding-left:18px;">${notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>`, 'Mudar o tipo');
+  if (!ok) return false;
+  Object.keys(cls).forEach((k) => { delete cls[k]; });
+  Object.assign(cls, next);
+  return true;
+}
+
 function renderConfig() {
   const list = $('class-list');
   list.innerHTML = '';
+  const again = () => rerenderKeepFocus(() => { renderConfig(); });
   state.classes.forEach((cls) => {
     const t = classType(cls);
     const row = document.createElement('div');
     row.className = 'class-row v4';
     const cv = classValueNative(cls, quotes);
     const cur = classCurrency(cls);
-    const curEditable = t === 'rendafixa' || t === 'valor';
+    const curEditable = (t === 'rendafixa' || t === 'valor') && !cls.isCash;
+    const canBeCash = t === 'valor' && cur === 'BRL';
+    const k = (f) => `data-f="${f}" data-key="${esc(cls.id)}:${f}"`;
     row.innerHTML = `
-      <div class="cr-cell cr-name" data-label="Classe"><input class="name-input" value="${esc(cls.name)}" data-f="name" maxlength="40"></div>
-      <div class="cr-cell cr-type" data-label="Tipo"><select class="plain-select type-select" data-f="type" ${cls.isCash ? 'disabled title="O Caixa é sempre de valor direto"' : ''}>${Object.entries(CLASS_TYPES).map(([k, v]) => `<option value="${k}" ${k === t ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
-      <div class="cr-cell cr-pct" data-label="Ideal"><div class="pct-input-wrap"><input class="pct-input" inputmode="decimal" value="${pct(cls.idealPct)}" data-f="idealPct"></div></div>
-      <div class="cr-cell cr-val" data-label="Valor atual"><div class="value-input-wrap ${cur === 'USD' ? 'usd' : ''}"><input class="value-input" inputmode="decimal" value="${n2(cv)}" data-f="currentValue" ${hasAssets(cls) ? 'disabled title="Soma dos ativos da classe"' : ''}></div></div>
-      <div class="cr-cell cr-cur" data-label="Moeda">${curEditable && !cls.isCash ? `<select class="plain-select" data-f="currency">${CURRENCIES.map((c) => `<option value="${c}" ${c === cur ? 'selected' : ''}>${sym(c).trim()}</option>`).join('')}</select>` : `<span style="font-size:13px; color:var(--text-muted); padding:9px 4px; display:inline-block;">${sym(cur).trim()}</span>`}</div>
-      <div class="cr-cell cr-frac">${t === 'b3' || t === 'exterior' ? `<label class="chk-label" title="Comprar valor exato (fração), sem cota inteira"><input type="checkbox" data-f="fractional" ${buyMode(cls) === 'fracao' ? 'checked' : ''}> Fração</label>` : ''}</div>
-      <label class="cr-cell cr-cash"><input type="radio" name="cash-class" class="chk-cash" data-f="isCash" ${cls.isCash ? 'checked' : ''} ${t === 'valor' ? '' : 'disabled title="Só uma classe de valor direto pode ser o Caixa"'}><span class="cash-word">Caixa</span></label>
+      <div class="cr-cell cr-name" data-label="Classe"><input class="name-input" value="${esc(cls.name)}" ${k('name')} maxlength="40"></div>
+      <div class="cr-cell cr-type" data-label="Tipo"><select class="plain-select type-select" ${k('type')} ${cls.isCash ? 'disabled title="O Caixa é sempre de valor direto"' : ''}>${Object.entries(CLASS_TYPES).map(([key, v]) => `<option value="${key}" ${key === t ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></div>
+      <div class="cr-cell cr-pct" data-label="Ideal"><div class="pct-input-wrap"><input class="pct-input" inputmode="decimal" value="${pct(cls.idealPct)}" ${k('idealPct')}></div></div>
+      <div class="cr-cell cr-val" data-label="Valor atual"><div class="value-input-wrap ${cur === 'USD' ? 'usd' : ''}"><input class="value-input" inputmode="decimal" value="${n2(cv)}" ${k('currentValue')} ${hasAssets(cls) ? 'disabled title="Soma dos ativos da classe"' : ''}></div></div>
+      <div class="cr-cell cr-cur" data-label="Moeda">${curEditable ? `<select class="plain-select" ${k('currency')}>${CURRENCIES.map((c) => `<option value="${c}" ${c === cur ? 'selected' : ''}>${sym(c).trim()}</option>`).join('')}</select>` : `<span style="font-size:13px; color:var(--text-muted); padding:9px 4px; display:inline-block;">${sym(cur).trim()}</span>`}${cls.isCash && cur !== 'BRL' ? ' <button class="link-btn" data-action="cash-brl">Converter para R$</button>' : ''}</div>
+      <div class="cr-cell cr-frac">${t === 'exterior' ? `<label class="chk-label" title="Comprar valor exato (fração), sem cota inteira"><input type="checkbox" ${k('fractional')} ${buyMode(cls) === 'fracao' ? 'checked' : ''}> Fração</label>` : t === 'b3' ? '<span class="frac-note" title="Na B3 a compra é sempre em cotas inteiras (o mercado fracionário também negocia cotas inteiras)">cotas inteiras</span>' : ''}</div>
+      <label class="cr-cell cr-cash"><input type="radio" name="cash-class" class="chk-cash" ${k('isCash')} ${cls.isCash ? 'checked' : ''} ${canBeCash || cls.isCash ? '' : `disabled title="${t === 'valor' ? 'O Caixa precisa estar em R$' : 'Só uma classe de valor direto pode ser o Caixa'}"`}><span class="cash-word">Caixa</span></label>
       <div class="cr-cell cr-del"><button class="icon-btn" data-action="remove" title="Remover classe" aria-label="Remover classe ${esc(cls.name)}">✕</button></div>`;
     const q = (f) => row.querySelector(`[data-f="${f}"]`);
-    q('name').addEventListener('change', (e) => { cls.name = e.target.value.trim() || 'Classe'; scheduleSave(); renderTopbar(); });
-    q('idealPct').addEventListener('change', (e) => { cls.idealPct = Math.max(0, Math.min(100, parseNum(e.target.value))); scheduleSave(); renderConfig(); });
+    q('name').addEventListener('change', (e) => { cls.name = e.target.value.trim().slice(0, 40) || 'Classe'; e.target.value = cls.name; scheduleSave(); renderTopbar(); });
+    q('idealPct').addEventListener('change', (e) => { if (fieldOr(e.target, { label: '% ideal', max: 100 }, (r) => { cls.idealPct = r.value; })) scheduleSave(); again(); });
     q('type').addEventListener('change', async (e) => {
-      const nt = e.target.value;
-      if (!CLASS_TYPES[nt.trim()]) return;
-      if (!CLASS_TYPES[nt].hasAssets && cls.assets.length) {
-        const ok = await confirmBox('Mudar o tipo?', `"${esc(cls.name)}" tem ${cls.assets.length} ativo(s). No tipo "Valor direto" a classe não tem ativos: eles serão removidos e o valor atual da classe passa a ser digitado.`, 'Mudar e remover ativos');
-        if (!ok) { renderConfig(); return; }
-        cls.currentValue = Math.round(classValueNative(cls, quotes) * 100) / 100;
-        cls.assets = [];
-      }
-      cls.type = nt;
-      cls.hasAssets = CLASS_TYPES[nt].hasAssets;
-      cls.currency = classCurrency(cls);
-      cls.fractional = nt === 'cripto' || nt === 'exterior';
-      scheduleSave(); renderConfig(); renderTopbar(); debounceQuoteRefresh();
+      const changed = await changeClassType(cls, e.target.value);
+      if (changed) { scheduleSave(); renderTopbar(); debounceQuoteRefresh(); toast('Tipo da classe alterado.'); }
+      renderConfig();
     });
-    q('currentValue')?.addEventListener('change', (e) => { cls.currentValue = Math.max(0, parseNum(e.target.value)); scheduleSave(); renderConfig(); });
-    q('currency')?.addEventListener('change', (e) => { cls.currency = e.target.value; scheduleSave(); renderConfig(); });
-    q('fractional')?.addEventListener('change', (e) => { cls.fractional = e.target.checked; scheduleSave(); renderConfig(); });
-    q('isCash').addEventListener('change', () => { state.classes.forEach((c) => { c.isCash = c.id === cls.id; }); scheduleSave(); renderConfig(); });
+    q('currentValue')?.addEventListener('change', (e) => { if (fieldOr(e.target, { label: 'Valor', max: 1e11 }, (r) => { cls.currentValue = round2(r.value); })) scheduleSave(); again(); renderTopbar(); });
+    q('currency')?.addEventListener('change', async (e) => {
+      const nc = e.target.value;
+      if (!CURRENCIES.includes(nc) || nc === cur) return;
+      if (classValueNative(cls, quotes) > 0) {
+        const ok = await confirmBox('Mudar a moeda?', `Os valores de "${esc(cls.name)}" continuam com os mesmos números, mas passam a ser lidos em ${nc}. Se você queria converter, ajuste os valores depois.`, `Mudar para ${nc}`);
+        if (!ok) { renderConfig(); return; }
+      }
+      cls.currency = nc; scheduleSave(); renderConfig();
+    });
+    q('fractional')?.addEventListener('change', (e) => { cls.fractional = e.target.checked; scheduleSave(); again(); });
+    q('isCash').addEventListener('change', () => {
+      if (!canBeCash) { renderConfig(); return; }
+      state.classes.forEach((c) => { c.isCash = c.id === cls.id; }); scheduleSave(); renderConfig();
+    });
+    row.querySelector('[data-action="cash-brl"]')?.addEventListener('click', async () => {
+      const r = fxRate(cur, fxCtx());
+      if (r === null) { toast(`Sem cotação de ${cur} agora — informe o câmbio abaixo.`); return; }
+      const v = round2((Number(cls.currentValue) || 0) * r);
+      if (!(await confirmBox('Converter o Caixa para R$?', `${money(Number(cls.currentValue) || 0, cur)} × ${n2(r)} = <b>${money(v)}</b>.`, 'Converter'))) return;
+      cls.currentValue = v; cls.currency = 'BRL'; scheduleSave(); renderConfig();
+    });
     row.querySelector('[data-action="remove"]').addEventListener('click', async () => {
       if (cls.isCash) { toast('Escolha outra classe como Caixa antes de remover esta.'); return; }
-      if (!(await confirmBox('Remover classe?', `Remover "${esc(cls.name)}"${cls.assets.length ? ` e seus ${cls.assets.length} ativo(s)` : ''}? Dá para desfazer em Histórico.`, 'Remover'))) return;
-      const prev = JSON.parse(JSON.stringify({ ...state, undo: undefined }));
-      state.classes = state.classes.filter((c) => c.id !== cls.id);
-      state.undo = { kind: 'classe', at: new Date().toISOString(), label: 'remoção da classe ' + cls.name, prev, after: -1 };
+      const v = classValueBRL(cls, quotes, fxCtx()) || 0;
+      if (!(await confirmBox('Remover classe?', `Remover "${esc(cls.name)}"${cls.assets.length ? ` e seus ${plural(cls.assets.length, 'ativo', 'ativos')}` : ''}?${v > 0 ? ` O valor dela (${money(v)}) deixa de contar no patrimônio.` : ''}`, 'Remover'))) return;
+      const idx = state.classes.findIndex((c) => c.id === cls.id);
+      if (idx < 0) return;
+      const removed = state.classes.splice(idx, 1)[0];
       scheduleSave(); renderConfig(); renderTopbar();
-      toast('Classe removida.', { action: { label: 'Desfazer', run: undoLast } });
+      offerSessionUndo(`Classe "${removed.name}" removida`, () => {
+        if (!state || state.classes.some((c) => c.id === removed.id)) { toast('Não dá mais para desfazer.'); return; }
+        state.classes.splice(Math.min(idx, state.classes.length), 0, removed);
+        scheduleSave(); renderConfig(); renderTopbar(); toast('Classe de volta.');
+      });
     });
     list.appendChild(row);
     if (classCurrency(cls) !== 'BRL' && fxRate(classCurrency(cls), fxCtx()) === null) {
@@ -1074,18 +1392,19 @@ function renderConfig() {
   renderTopbar();
 }
 function renderFxCards() {
+  pendingRender.delete('fx-grid');
   const g = $('fx-grid'); if (!g || !state) return;
   g.innerHTML = ['USD', 'EUR'].map((cur) => {
     const auto = fxAuto[cur];
     const man = state.settings.fxManual?.[cur];
     return `<div class="fx-card"><div class="k">${cur === 'USD' ? 'Dólar (US$)' : 'Euro (€)'}</div><div class="v">${man > 0 ? 'R$ ' + n2(man) : auto ? 'R$ ' + n2(auto) : '—'}</div>
-      <div class="field"><label>Fixar valor (vazio = automático)</label><div class="value-input-wrap"><input class="value-input" inputmode="decimal" data-fx="${cur}" value="${man > 0 ? n2(man) : ''}" placeholder="automático"></div></div>
+      <div class="field"><label>Fixar valor (vazio = automático)</label><div class="value-input-wrap"><input class="value-input" inputmode="decimal" data-fx="${cur}" data-key="fx:${cur}" value="${man > 0 ? n2(man) : ''}" placeholder="automático"></div></div>
       <div class="s">${auto ? `Automático: R$ ${n2(auto)} · ${ago(fxUpdatedAt[cur])}` : 'Automático indisponível no momento'}${man > 0 ? ' · usando o valor fixado' : ''}</div></div>`;
   }).join('');
   g.querySelectorAll('[data-fx]').forEach((inp) => inp.addEventListener('change', (e) => {
-    const v = parseNum(e.target.value);
-    state.settings.fxManual[e.target.dataset.fx] = v > 0 ? v : null;
-    scheduleSave(); renderFxCards(); renderTopbar();
+    const cur = e.target.dataset.fx;
+    if (fieldOr(e.target, { label: `Câmbio ${cur}`, max: 1000 }, (r) => { state.settings.fxManual[cur] = !r.empty && r.value > 0 ? Math.round(r.value * 10000) / 10000 : null; })) scheduleSave();
+    rerenderKeepFocus(() => { renderFxCards(); renderTopbar(); });
   }));
 }
 
@@ -1105,16 +1424,21 @@ function renderAgenda() {
     $('agenda-weekday').addEventListener('change', (e) => { ag.weekday = Number(e.target.value); scheduleSave(); renderAgenda(); });
   } else if (ag.frequency === 'mensal') {
     d.innerHTML = `<div class="field"><label for="agenda-day" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Dia do mês (1 a 28)</label><input class="plain-input" style="width:80px; text-align:left;" id="agenda-day" inputmode="numeric" value="${esc(ag.dayOfMonth || 5)}"></div>`;
-    $('agenda-day').addEventListener('change', (e) => { ag.dayOfMonth = Math.max(1, Math.min(28, Math.round(parseNum(e.target.value)) || 5)); scheduleSave(); renderAgenda(); });
+    $('agenda-day').addEventListener('change', (e) => { if (fieldOr(e.target, { label: 'Dia do mês', min: 1, max: 28, int: true, allowEmpty: false }, (r) => { ag.dayOfMonth = r.value; })) scheduleSave(); renderAgenda(); });
   } else if (ag.frequency === 'personalizado') {
     d.innerHTML = `<div class="field" style="min-width:260px;"><label for="agenda-note" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Sua rotina (nota livre)</label><input class="name-input" id="agenda-note" maxlength="120" value="${esc(ag.customNote || '')}" placeholder="ex: aporto quando sobra dinheiro no fim do mês"></div>`;
-    $('agenda-note').addEventListener('change', (e) => { ag.customNote = e.target.value; scheduleSave(); renderTopbar(); });
+    $('agenda-note').addEventListener('input', (e) => { ag.customNote = e.target.value.slice(0, 120); renderAgendaNext(); });
+    $('agenda-note').addEventListener('change', () => { scheduleSave(); renderTopbar(); });
   } else d.innerHTML = '';
+  renderAgendaNext();
+  renderTopbar();
+}
+function renderAgendaNext() {
+  const ag = state.agenda;
   const next = nextAporteDate(ag);
   const el = $('agenda-next-val');
   if (!next) el.textContent = ag.customNote || 'Defina sua rotina abaixo';
   else { const today = new Date(); today.setHours(0, 0, 0, 0); const diff = Math.round((next - today) / 86400000); el.textContent = (diff <= 0 ? 'Hoje' : diff === 1 ? 'Amanhã' : `Em ${diff} dias`) + ' · ' + next.toLocaleDateString('pt-BR'); }
-  renderTopbar();
 }
 
 // ---------------------------------------------------------------------
@@ -1122,32 +1446,78 @@ function renderAgenda() {
 // ---------------------------------------------------------------------
 function renderTimeline() {
   if (!$('div-data').value) $('div-data').value = todayISO();
-  const u = state.undo;
-  const aps = [...state.aportes].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).slice(0, 8);
-  $('aportes-card').innerHTML = `<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:${aps.length ? 8 : 0}px;"><h3 class="card-title" style="margin:0;">Últimos aportes</h3>${u && u.prev ? `<button class="btn btn-sm" id="btn-undo">Desfazer ${esc(u.label || 'último registro')}</button>` : ''}</div>` +
-    (aps.length ? aps.map((a) => `<div class="aporte-row"><div><div class="d">${fmtDateBR(a.date)}</div><div style="font-size:12px; color:var(--text-muted);">${esc(a.observacao || `${(a.compras || []).length} compra(s)`)}</div></div><div style="text-align:right;"><div class="v">${money(Number(a.disponivel) || 0)}</div><div style="font-size:11px; color:var(--text-faint);">caixa +${money(Number(a.sobra || 0) + 0)}</div></div></div>`).join('') : '<div class="empty-state" style="padding:16px;">Nenhum aporte registrado ainda.</div>');
-  $('btn-undo')?.addEventListener('click', undoLast);
+  const aps = [...state.aportes].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).slice(0, 12);
+  $('aportes-card').innerHTML = `<h3 class="card-title" style="margin:0 0 ${aps.length ? 8 : 0}px;">Últimos aportes</h3>` +
+    (aps.length ? aps.map((a) => {
+      const caixa = a.caixa != null ? Number(a.caixa) : Number(a.sobra || 0);
+      const det = a.caixa != null && Number(a.caixaPlano) > 0 && Number(a.sobra) > 0 ? ` (${money(Number(a.caixaPlano))} do plano + ${money(Number(a.sobra))} de sobras)` : '';
+      const n = (a.compras || []).length;
+      return `<div class="aporte-row"><div><div class="d">${fmtDateBR(a.date)}</div><div style="font-size:12px; color:var(--text-muted);">${esc(a.observacao || plural(n, 'compra', 'compras'))}</div></div>
+        <div style="text-align:right;"><div class="v">${money(Number(a.disponivel) || 0)}</div><div style="font-size:11px; color:var(--text-faint);">caixa +${money(caixa)}${det}</div>
+        ${Array.isArray(a.deltas) ? `<button class="link-btn" data-undo-aporte="${esc(a.id)}" style="font-size:12px; margin-top:2px;">Desfazer</button>` : ''}</div></div>`;
+    }).join('') : '<div class="empty-state" style="padding:16px;">Nenhum aporte registrado ainda.</div>');
+  $('aportes-card').querySelectorAll('[data-undo-aporte]').forEach((b) => b.addEventListener('click', () => undoAporte(b.dataset.undoAporte)));
+  const divs = [...state.dividendos].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).slice(0, 30);
+  const pc = $('proventos-card');
+  if (pc) {
+    pc.innerHTML = `<h3 class="card-title" style="margin:0 0 ${divs.length ? 8 : 0}px;">Proventos registrados</h3>` + (divs.length ? divs.map((d) => `<div class="aporte-row"><div><div class="d">${fmtDateBR(d.date)}</div><div style="font-size:12px; color:var(--text-muted);">${esc(d.tipo || 'Provento')} · ${esc(d.ticker)}${d.addedToCaixa ? ' · somado ao Caixa' : ''}</div></div>
+      <div style="text-align:right;"><div class="v">${money(Number(d.valor) || 0)}</div><button class="link-btn" data-del-div="${esc(d.id)}" style="font-size:12px;">Excluir</button></div></div>`).join('')
+      : '<div class="empty-state" style="padding:16px;">Nenhum provento registrado ainda.</div>');
+    pc.querySelectorAll('[data-del-div]').forEach((b) => b.addEventListener('click', () => deleteDividendo(b.dataset.delDiv)));
+  }
   const items = [...state.timeline].sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1));
   const c = $('timeline-container');
   if (!items.length) { c.innerHTML = '<div class="empty-state">Nenhum evento ainda. Registre um aporte ou um provento para começar sua linha do tempo.</div>'; return; }
   c.innerHTML = '<div class="timeline">' + items.map((it) => `<div class="tl-item ${esc(it.type)}"><div class="tl-date">${fmtDateBR(it.date)}</div><div class="tl-title">${esc(it.title)}</div>${it.detail ? `<div class="tl-detail">${esc(it.detail)}</div>` : ''}</div>`).join('') + '</div>';
 }
+const MAX_PROVENTO = 10000000; // R$ 10 milhões por lançamento: acima disso é quase certamente erro de digitação
 function addDividendo(e) {
   e.preventDefault();
-  const ticker = normTicker($('div-ticker').value);
-  const tipo = $('div-tipo').value;
-  const valor = parseNum($('div-valor').value);
+  const ticker = normTicker($('div-ticker').value).replace(/\s+/g, '').slice(0, 20);
+  const tipo = String($('div-tipo').value || 'Outro').slice(0, 30);
+  const vr = readField($('div-valor'), { label: 'Valor do provento', max: MAX_PROVENTO, allowEmpty: false });
   const data = $('div-data').value || todayISO();
   const addCaixa = $('div-add-caixa').checked;
-  if (!ticker || !(valor > 0)) { toast('Informe o ticker e um valor maior que zero.'); return; }
+  if (!ticker) { toast('Informe o ticker do provento.'); return; }
+  if (!vr.ok) { toast(vr.msg); return; }
+  const valor = round2(vr.value);
+  if (!(valor > 0)) { toast('O valor do provento precisa ser maior que zero.'); return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) { toast('Data inválida.'); return; }
   if (data > todayISO()) { toast('A data do provento não pode ser no futuro.'); return; }
-  state.dividendos.push({ id: uid(), date: data, ticker, tipo, valor: Math.round(valor * 100) / 100, addedToCaixa: addCaixa });
-  state.timeline.push({ id: uid(), date: data, type: 'dividendo', title: `${tipo} de ${ticker}: ${money(valor)}`, detail: addCaixa ? 'Somado ao Caixa de Oportunidade.' : 'Apenas registrado — não somado ao Caixa.' });
-  if (addCaixa) { const cash = state.classes.find((c) => c.isCash); if (cash) cash.currentValue = Math.round((Number(cash.currentValue) + valor) * 100) / 100; }
+  const cash = state.classes.find((c) => c.isCash);
+  if (addCaixa && !cash) { toast('Marque uma classe como Caixa em Configuração para somar o provento.'); return; }
+  const id = uid();
+  state.dividendos.push({ id, date: data, ticker, tipo, valor, addedToCaixa: addCaixa });
+  state.timeline.push({ id: uid(), dividendoId: id, date: data, type: 'dividendo', title: `${tipo} de ${ticker}: ${money(valor)}`, detail: addCaixa ? 'Somado ao Caixa de Oportunidade.' : 'Apenas registrado — não somado ao Caixa.' });
+  if (addCaixa) cash.currentValue = round2((Number(cash.currentValue) || 0) + valor);
   scheduleSave();
   $('div-ticker').value = ''; $('div-valor').value = '';
   renderTimeline(); renderTopbar();
   toast('Provento registrado.');
+}
+async function deleteDividendo(id) {
+  const d = state.dividendos.find((x) => x.id === id);
+  if (!d) return;
+  const cash = state.classes.find((c) => c.isCash);
+  const fromCash = d.addedToCaixa && cash;
+  const ok = await confirmBox('Excluir provento?', `${esc(d.tipo || 'Provento')} de <b>${esc(d.ticker)}</b>: ${money(Number(d.valor) || 0)} em ${fmtDateBR(d.date)}.${fromCash ? ` Ele tinha sido somado ao Caixa — vou tirar ${money(Number(d.valor) || 0)} do Caixa.` : ''}`, 'Excluir');
+  if (!ok) return;
+  state.dividendos = state.dividendos.filter((x) => x.id !== id);
+  const before = state.timeline.length;
+  state.timeline = state.timeline.filter((t) => t.dividendoId !== id);
+  if (state.timeline.length === before) { // registro antigo, sem ligação: remove o evento igual
+    const title = `${d.tipo} de ${d.ticker}: ${money(Number(d.valor) || 0)}`;
+    const i = state.timeline.findIndex((t) => t.type === 'dividendo' && t.date === d.date && t.title === title);
+    if (i >= 0) state.timeline.splice(i, 1);
+  }
+  let warn = '';
+  if (fromCash) {
+    const cur = Number(cash.currentValue) || 0;
+    if (cur < Number(d.valor)) warn = ` O Caixa tinha só ${money(cur)} e ficou em R$ 0,00.`;
+    cash.currentValue = Math.max(0, round2(cur - Number(d.valor)));
+  }
+  scheduleSave(); renderTimeline(); renderTopbar();
+  toast('Provento excluído.' + warn, { ms: warn ? 7000 : 3600 });
 }
 
 // ---------------------------------------------------------------------
@@ -1155,7 +1525,7 @@ function addDividendo(e) {
 // ---------------------------------------------------------------------
 function exportBackup(st = state, name = 'aporte-mais-backup') {
   if (!st) return;
-  const payload = { app: 'aporte-mais', version: st.version, appVersion: APP_VERSION, exportedAt: new Date().toISOString(), state: { ...st, undo: undefined } };
+  const payload = { app: 'aporte-mais', version: st.version, appVersion: APP_VERSION, exportedAt: new Date().toISOString(), state: st };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1172,37 +1542,48 @@ async function importBackup(e) {
   let incoming;
   try { const parsed = JSON.parse(await file.text()); incoming = parsed && parsed.state ? parsed.state : parsed; if (!incoming || !Array.isArray(incoming.classes)) throw new Error('formato'); }
   catch { toast('Não foi possível importar: arquivo inválido ou corrompido.'); return; }
+  if (!Array.isArray(incoming.classes) || incoming.classes.filter((c) => c && typeof c === 'object' && !Array.isArray(c)).length === 0) {
+    toast('Este backup não tem nenhuma classe — nada para importar.'); return;
+  }
   const migrated = migrateState(incoming);
   const nAssets = migrated.classes.reduce((s, c) => s + (c.assets || []).length, 0);
-  if (!(await confirmBox('Importar backup?', `O backup tem ${migrated.classes.length} classes, ${nAssets} ativos e ${migrated.aportes.length} aportes. Ele vai substituir a carteira atual (dá para desfazer em Histórico).`, 'Importar'))) return;
-  const prev = JSON.parse(JSON.stringify({ ...state, undo: undefined }));
+  const choice = await dialog({ title: 'Importar backup?',
+    html: `<p>O backup tem ${plural(migrated.classes.length, 'classe', 'classes')}, ${plural(nAssets, 'ativo', 'ativos')} e ${plural(migrated.aportes.length, 'aporte', 'aportes')}. Ele vai <b>substituir</b> a carteira atual.</p><p>Recomendado: baixe antes um backup da carteira atual — é o jeito de voltar atrás.</p>`,
+    buttons: [{ label: 'Cancelar', value: null }, { label: 'Importar sem backup', value: 'direct' }, { label: 'Baixar a atual e importar', kind: 'primary', value: 'backup' }] });
+  if (!choice) return;
+  if (choice === 'backup') exportBackup(state, 'aporte-mais-antes-da-importacao');
   state = migrated;
-  state.undo = { kind: 'import', at: new Date().toISOString(), label: 'importação do backup', prev, after: -1 };
+  lastPlan = null; sessionUndo = null; openTermPanels.clear();
   activeAtivosClassId = state.classes.find((c) => hasAssets(c))?.id || null;
   scheduleSave(); renderConfig(); renderTopbar(); debounceQuoteRefresh();
-  toast('Backup importado.', { action: { label: 'Desfazer', run: undoLast } });
+  toast('Backup importado.');
+  showMigrationNotes();
 }
 
 // ---------------------------------------------------------------------
 // Ligações de eventos fixos
 // ---------------------------------------------------------------------
+async function doLogout() {
+  clearTimeout(saveTimer);
+  if (dirty && !conflict) await saveNow();
+  for (let i = 0; i < 100 && saving; i++) await new Promise((r) => setTimeout(r, 100));
+  if (dirty) {
+    const choice = await dialog({ title: 'Sair sem salvar?', html: '<p>Algumas alterações ainda não chegaram à nuvem. Baixe um backup para não perdê-las.</p>',
+      buttons: [{ label: 'Cancelar', value: null }, { label: 'Baixar backup e sair', value: 'backup' }, { label: 'Sair mesmo assim', kind: 'primary', value: 'exit' }] });
+    if (!choice) return;
+    if (choice === 'backup') exportBackup();
+  }
+  dirty = false; // a pessoa decidiu sair
+  await sb.auth.signOut({ scope: 'local' });
+}
 function wire() {
   $('auth-form').addEventListener('submit', onAuthSubmit);
   $('btn-auth-toggle').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'signup' : 'login'));
   $('btn-auth-forgot').addEventListener('click', () => setAuthMode('forgot'));
   document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-  $('btn-logout').addEventListener('click', async () => {
-    clearTimeout(saveTimer);
-    if (dirty && !conflict) await saveNow();
-    for (let i = 0; i < 60 && saving; i++) await new Promise((r) => setTimeout(r, 100));
-    if (dirty) {
-      const choice = await dialog({ title: 'Sair sem salvar?', html: '<p>Algumas alterações ainda não chegaram à nuvem. Baixe um backup para não perdê-las.</p>',
-        buttons: [{ label: 'Cancelar', value: null }, { label: 'Baixar backup e sair', value: 'backup' }, { label: 'Sair mesmo assim', kind: 'primary', value: 'exit' }] });
-      if (!choice) return;
-      if (choice === 'backup') exportBackup();
-    }
-    await sb.auth.signOut({ scope: 'local' });
-  });
+  $('btn-logout').addEventListener('click', doLogout);
+  $('btn-logout-2')?.addEventListener('click', doLogout);
+  ['asset-list', 'class-list', 'fx-grid'].forEach((id) => $(id)?.addEventListener('focusout', () => flushPending(id)));
   $('quote-chip').addEventListener('click', () => refreshQuotes({ silent: false }));
   $('aporte-form').addEventListener('submit', (e) => { e.preventDefault(); calcular(); });
   $('btn-refresh-prices').addEventListener('click', () => refreshQuotes({ silent: false }));
@@ -1210,12 +1591,14 @@ function wire() {
   $('btn-add-asset').addEventListener('click', () => {
     const cls = state.classes.find((c) => c.id === activeAtivosClassId);
     if (!cls) return;
+    if (cls.assets.length >= 300) { toast('Máximo de 300 ativos por classe.'); return; }
     cls.assets.push({ id: uid(), ticker: '', idealPct: 0, qty: 0, price: 0, priceMode: 'auto', currentValue: 0, minQty: 1, minAmount: 0, lastQuotePrice: 0, termometro: { nota: null, motivos: [] } });
     scheduleSave(); renderAtivos();
     const inputs = document.querySelectorAll('#asset-list [data-f="ticker"]');
     inputs[inputs.length - 1]?.focus();
   });
   $('btn-add-class').addEventListener('click', () => {
+    if (state.classes.length >= 50) { toast('Máximo de 50 classes.'); return; }
     state.classes.push({ id: uid(), name: 'Nova classe', type: 'b3', hasAssets: true, idealPct: 0, isCash: false, currency: 'BRL', fractional: false, currentValue: 0, assets: [] });
     scheduleSave(); renderConfig();
   });
@@ -1245,7 +1628,7 @@ function wire() {
     if (event === 'PASSWORD_RECOVERY') { setTimeout(() => askNewPassword('Criar nova senha'), 300); }
     if (event === 'SIGNED_OUT') {
       const unsaved = dirty && state ? state : null;
-      resetSession(); dirty = false; saveFailing = false; renderSaveBanner();
+      resetSession(); resetUI(); dirty = false; saveFailing = false; renderSaveBanner();
       showAuth('login');
       if (unsaved) dialog({ title: 'Sessão encerrada', html: '<p>Você saiu da conta antes de algumas alterações chegarem à nuvem. Baixe um backup delas para importar depois.</p>',
         buttons: [{ label: 'Fechar', value: null }, { label: 'Baixar backup', kind: 'primary', value: 'b' }] }).then((v) => { if (v) exportBackup(unsaved, 'aporte-mais-nao-salvo'); });

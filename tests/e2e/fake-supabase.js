@@ -11,7 +11,7 @@
   const nowIso = () => new Date().toISOString();
 
   function initialDb() {
-    const db = { users: [{ id: 'u1', email: 'pessoa@teste.com', password: 'senha12345' }], portfolios: [], portfolio_state: [], tracked_tickers: [], ticker_quotes: [], exchange_rates: [], ticker_sentiment: [], calls: { invoke: 0, upsert_state: 0 } };
+    const db = { users: [{ id: 'u1', email: 'pessoa@teste.com', password: 'senha12345' }, { id: 'u2', email: 'outra@teste.com', password: 'senha67890' }], portfolios: [], portfolio_state: [], tracked_tickers: [], ticker_quotes: [], exchange_rates: [], ticker_sentiment: [], calls: { invoke: 0, upsert_state: 0 } };
     db.portfolios.push({ id: 'p1', user_id: 'u1', name: 'Minha carteira', created_at: '2026-09-13T22:53:30Z' });
     if (scenario === 'corrupt') db.portfolio_state.push({ portfolio_id: 'p1', state: { classes: 'quebrado', extra: 1 }, updated_at: '2026-10-11T16:34:43.576593+00:00' });
     else if (scenario !== 'new') db.portfolio_state.push({ portfolio_id: 'p1', state: JSON.parse(JSON.stringify(F[scenario] || F.zerada)), updated_at: '2026-10-11T16:34:43.576593+00:00' });

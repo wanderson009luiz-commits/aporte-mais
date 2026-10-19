@@ -493,3 +493,12 @@ button:disabled{cursor:not-allowed;opacity:.5;}
   .order-actions .btn{flex:1; justify-content:center;}
   .quote-chip{font-size:11px;}
 }
+
+/* v4.1 */
+.account-actions{display:flex; gap:8px; flex-wrap:wrap;}
+.top-row > div:first-child{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.top-row .cl{white-space:nowrap;}
+.result-class-head:focus-visible{outline:2px solid var(--brass); outline-offset:-2px;}
+input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 2px rgba(217,122,88,.25);}
+.frac-note{font-size:11px; color:var(--text-faint);}
+.modal ul{margin:8px 0 14px; padding-left:18px; font-size:13px; line-height:1.55;}

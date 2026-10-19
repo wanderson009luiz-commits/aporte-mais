@@ -67,7 +67,7 @@ console.log('\n1) Carteira com todos os preços zerados — calcular, registrar,
   await page.waitForSelector('.order-card');
   const order = await txt(page, '#resultado-container');
   check(/Comprar na bolsa/i.test(order) && /Comprar valor exato/i.test(order) && /Aplicar/i.test(order), 'ordem tem bolsa, valor exato (cripto) e renda fixa');
-  check(/BCFF11 está sem preço/.test(order), 'aviso do ativo sem preço aparece');
+  check(/sem preço — [^.]*BCFF11/.test(order), 'aviso agrupado dos ativos sem preço aparece (BCFF11)');
   const totals = await page.locator('.order-totals').innerText();
   check(/R\$\s*1\.000,00/.test(totals), 'aporte total R$ 1.000,00');
   await page.screenshot({ path: `${shots}/02-aporte-resultado-desktop.png`, fullPage: true });
@@ -92,7 +92,9 @@ console.log('\n1) Carteira com todos os preços zerados — calcular, registrar,
   const hist = await txt(page, '#aportes-card');
   check(/1\.000,00/.test(hist) && /Desfazer/.test(hist), 'histórico mostra o aporte e o botão desfazer');
   await page.screenshot({ path: `${shots}/03-historico-desktop.png`, fullPage: true });
-  await page.click('#btn-undo');
+  await page.click('[data-undo-aporte]');
+  await page.waitForSelector('.modal-back.show');
+  check(/exatamente o que ele somou/.test(await txt(page, '#modal')), 'desfazer explica que tira só o que o aporte somou');
   await page.click('.modal .btn-primary');
   await page.waitForTimeout(1200);
   const pat3 = money(await txt(page, '#patrimonio-total'));
@@ -314,6 +316,242 @@ console.log('\n11) Carteira corrompida no banco: nada é gravado por cima');
   check(/formato inesperado/.test(await txt(page, '#boot-screen')), 'mostra aviso de formato inesperado com "Baixar dados brutos"');
   const st = await page.evaluate(() => window.__fakeDb().portfolio_state[0].state);
   check(st.classes === 'quebrado' && st.extra === 1, 'o documento original continua intacto');
+  await page.close();
+}
+
+
+// helpers dos cenários novos
+async function openApp(query, viewport) {
+  const page = await newPage(query, viewport);
+  await page.waitForSelector('#app-root:not([style*="none"])');
+  await page.waitForFunction(() => document.querySelector('#quote-chip-txt')?.textContent === 'agora', null, { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  return page;
+}
+async function calcularAporte(page, valor) {
+  await page.click('.nav-btn[data-tab="aporte"]');
+  await page.fill('#aporte-valor', valor);
+  await page.click('#btn-calcular');
+  await page.waitForSelector('.order-card');
+}
+async function confirmModal(page) {
+  await page.waitForSelector('.modal-back.show');
+  await page.click('.modal .btn-primary');
+}
+const dbState = (page) => page.evaluate(() => window.__fakeDb().portfolio_state.find((r) => r.portfolio_id === 'p1').state);
+
+// ---------------------------------------------------------------- 12
+console.log('\n12) Ordem velha nunca pode ser registrada; cotação igual não apaga a ordem');
+{
+  const page = await openApp('scenario=zerada&run=12');
+  await calcularAporte(page, '1000');
+  await page.click('#quote-chip');
+  await page.waitForTimeout(1200);
+  check(await page.locator('.order-card').count() === 1, 'atualizar cotações sem mudança de preço mantém a ordem na tela');
+  await page.click('.nav-btn[data-tab="ativos"]');
+  const qty = page.locator('.asset-card').first().locator('[data-f="qty"]');
+  await qty.fill('5'); await qty.press('Tab');
+  await page.waitForTimeout(400);
+  await page.click('.nav-btn[data-tab="aporte"]');
+  const r = await txt(page, '#resultado-container');
+  check(/mudaram depois do cálculo/.test(r) && (await page.locator('#btn-registrar').count()) === 0, 'depois de mudar a carteira a ordem antiga some e pede novo cálculo');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 13
+console.log('\n13) Desfazer tira só o aporte; observação digitada depois vale; Caixa completo no histórico');
+{
+  const page = await openApp('scenario=zerada&run=13');
+  await calcularAporte(page, '500');
+  await page.fill('#aporte-obs', 'salário de outubro');
+  await page.click('#btn-registrar');
+  await confirmModal(page);
+  await page.waitForFunction(() => /salvo/.test(document.querySelector('#toast')?.textContent || ''), null, { timeout: 6000 });
+  let st = await dbState(page);
+  check(st.aportes.length === 1 && st.aportes[0].observacao === 'salário de outubro', 'observação digitada depois do cálculo foi gravada');
+  await page.click('.nav-btn[data-tab="timeline"]');
+  const hist = await txt(page, '#aportes-card');
+  const rec = st.aportes[0];
+  check(new RegExp('caixa \\+R\\$\\s*' + rec.caixa.toLocaleString('pt-BR', { minimumFractionDigits: 2 }).replace('.', '\\.')).test(hist), `histórico mostra o Caixa total do aporte (R$ ${rec.caixa})`);
+  await page.fill('#div-ticker', 'MXRF11');
+  await page.fill('#div-valor', '45,90');
+  await page.click('#btn-add-div');
+  await page.waitForTimeout(300);
+  // depois do aporte, a pessoa compra mais 3 cotas de um ativo que o aporte também comprou
+  const acoes = st.classes.find((c) => c.id === 'acoes');
+  const dq = rec.deltas.find((d) => d.classId === 'acoes' && d.field === 'qty');
+  const tk = acoes.assets.find((a) => a.id === dq.assetId).ticker;
+  await page.click('.nav-btn[data-tab="ativos"]');
+  await page.click('.class-tab:has-text("Ações")');
+  const card = page.locator('.asset-card').filter({ has: page.locator(`[data-f="ticker"][value="${tk}"]`) });
+  const q2 = card.locator('[data-f="qty"]');
+  await q2.fill(String(dq.amount + 3)); await q2.press('Tab');
+  await page.waitForTimeout(300);
+  await page.click('.nav-btn[data-tab="timeline"]');
+  await page.click('[data-undo-aporte]');
+  await confirmModal(page);
+  await page.waitForTimeout(1500);
+  st = await dbState(page);
+  const cash = st.classes.find((c) => c.isCash);
+  check(st.aportes.length === 0, 'o aporte saiu do histórico');
+  check(st.dividendos.length === 1 && Math.abs(cash.currentValue - 45.9) < 0.001, `o provento registrado depois continua (Caixa = R$ 45,90; obtido ${cash.currentValue})`);
+  const after = st.classes.find((c) => c.id === 'acoes').assets.find((a) => a.id === dq.assetId).qty;
+  check(after === 3, `${tk}: o aporte tirou só as ${dq.amount} cotas dele; as 3 compradas depois ficaram (obtido ${after})`);
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 14
+console.log('\n14) Registrar sem conseguir salvar: aviso claro, nada some em silêncio');
+{
+  const page = await openApp('scenario=zerada&run=14&fail=state_update');
+  await calcularAporte(page, '200');
+  await page.click('#btn-registrar');
+  await confirmModal(page);
+  await page.waitForFunction(() => /ainda NÃO salvo/.test(document.querySelector('#modal')?.textContent || ''), null, { timeout: 10000 });
+  check(true, 'mostra "Aporte registrado — ainda NÃO salvo na nuvem" com opção de backup');
+  check(/ainda não foram salvas/.test(await txt(page, '#save-banner')), 'aviso fixo no topo continua visível');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 15
+console.log('\n15) Centavos do patrimônio no topo e Caixa só em R$');
+{
+  const page = await openApp('scenario=new&run=15');
+  await page.click('.nav-btn[data-tab="config"]');
+  await page.click('#btn-add-class');
+  const row = page.locator('#class-list .class-row').last();
+  await row.locator('[data-f="type"]').selectOption('valor');
+  await confirmModal(page);
+  await page.waitForTimeout(300);
+  const row2 = page.locator('#class-list .class-row').last();
+  await row2.locator('[data-f="currency"]').selectOption('USD');
+  await page.waitForTimeout(300);
+  const v = page.locator('#class-list .class-row').last().locator('[data-f="currentValue"]');
+  await v.fill('10,07'); await v.press('Tab');
+  await page.waitForTimeout(400);
+  const top = await txt(page, '#patrimonio-total');
+  check(/51,00/.test(top), `US$ 10,07 × 5,0645 = R$ 51,00 no topo (obtido "${top.replace(/\s+/g, ' ')}")`);
+  check(await page.locator('#class-list .class-row').last().locator('[data-f="isCash"]').isDisabled(), 'classe em US$ não pode ser marcada como Caixa');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 16
+console.log('\n16) Celular: dá para sair da conta em Configuração');
+{
+  const page = await openApp('scenario=zerada&run=16', { width: 390, height: 844 });
+  await page.click('.nav-btn[data-tab="config"]');
+  const b = page.locator('#btn-logout-2');
+  check(await b.isVisible(), 'botão "Sair da conta" visível no celular');
+  await b.click();
+  await page.waitForSelector('#auth-screen:not([style*="none"])', { timeout: 5000 });
+  check(true, 'sair funciona no celular');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 17
+console.log('\n17) Trocar de conta no mesmo navegador não mostra nada da conta anterior');
+{
+  const page = await openApp('scenario=zerada&run=17');
+  await calcularAporte(page, '1000');
+  await page.fill('#aporte-obs', 'segredo do usuário 1');
+  await page.click('.nav-btn[data-tab="timeline"]');
+  await page.fill('#div-ticker', 'XPTO11');
+  await page.fill('#div-valor', '10');
+  await page.click('#btn-logout');
+  await page.waitForSelector('#auth-screen:not([style*="none"])');
+  check((await page.inputValue('#auth-password')) === '' && (await page.inputValue('#auth-email')) === '', 'tela de login volta vazia (sem e-mail e senha da conta anterior)');
+  await page.fill('#auth-email', 'outra@teste.com');
+  await page.fill('#auth-password', 'senha67890');
+  await page.click('#btn-auth-main');
+  await page.waitForSelector('#app-root:not([style*="none"])', { timeout: 6000 });
+  await page.waitForTimeout(500);
+  check(await page.locator('#tab-painel').isVisible(), 'a conta nova começa no Painel');
+  await page.click('.nav-btn[data-tab="aporte"]');
+  check((await page.inputValue('#aporte-valor')) === '' && (await page.inputValue('#aporte-obs')) === '' && (await page.locator('.order-card').count()) === 0, 'nenhuma ordem, valor ou observação da conta anterior');
+  await page.click('.nav-btn[data-tab="timeline"]');
+  check((await page.inputValue('#div-ticker')) === '' && (await page.inputValue('#div-valor')) === '', 'formulário de provento limpo');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 18
+console.log('\n18) Teclado em Ativos: Tab não perde o foco nem o que foi digitado');
+{
+  const page = await openApp('scenario=zerada&run=18');
+  await page.click('.nav-btn[data-tab="ativos"]');
+  const card = page.locator('.asset-card').first();
+  await card.locator('[data-f="qty"]').fill('10');
+  await page.keyboard.press('Tab');
+  await page.waitForTimeout(150);
+  await page.keyboard.type('70');
+  await page.keyboard.press('Tab');
+  await page.waitForTimeout(1500);
+  const st = await dbState(page);
+  const a0 = st.classes[0].assets[0];
+  check(a0.qty === 10 && a0.price === 70 && a0.priceMode === 'manual', `quantidade 10 e preço 70 digitados em sequência (qty=${a0.qty}, preço=${a0.price}, ${a0.priceMode})`);
+  await page.locator('.asset-card').first().locator('[data-action="toggle-term"]').click();
+  const nota = page.locator('.asset-card').first().locator('[data-f="nota"]');
+  await nota.fill('80'); await nota.press('Tab');
+  await page.waitForTimeout(300);
+  check(await page.locator('.asset-card').first().locator('.term-panel.open').count() === 1, 'o termômetro continua aberto depois de digitar a nota');
+  const pctIn = page.locator('.asset-card').first().locator('[data-f="idealPct"]');
+  await pctIn.fill('abc'); await pctIn.press('Tab');
+  await page.waitForTimeout(300);
+  check(/não é um número válido/.test(await txt(page, '#toast')), 'texto inválido no % ideal mostra aviso em vez de virar 0');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 19
+console.log('\n19) Proventos: limite de valor e exclusão');
+{
+  const page = await openApp('scenario=zerada&run=19');
+  await page.click('.nav-btn[data-tab="timeline"]');
+  await page.fill('#div-ticker', 'MXRF11');
+  await page.fill('#div-valor', '99999999999');
+  await page.click('#btn-add-div');
+  await page.waitForTimeout(300);
+  check(/máximo/.test(await txt(page, '#toast')) && (await dbState(page)).dividendos.length === 0, 'valor absurdo é recusado com aviso');
+  await page.fill('#div-valor', '45,90');
+  await page.click('#btn-add-div');
+  await page.waitForTimeout(1200);
+  let st = await dbState(page);
+  check(st.dividendos.length === 1 && Math.abs(st.classes.find((c) => c.isCash).currentValue - 45.9) < 0.001, 'provento somado ao Caixa');
+  await page.click('[data-del-div]');
+  await confirmModal(page);
+  await page.waitForTimeout(1200);
+  st = await dbState(page);
+  check(st.dividendos.length === 0 && st.classes.find((c) => c.isCash).currentValue === 0 && !st.timeline.some((t) => t.type === 'dividendo'), 'excluir tira o provento, o valor do Caixa e o evento do histórico');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 20
+console.log('\n20) Mudar o tipo da classe não zera o valor');
+{
+  const page = await openApp('scenario=zerada&run=20');
+  await page.click('.nav-btn[data-tab="ativos"]');
+  const q = page.locator('.asset-card').first().locator('[data-f="qty"]');
+  await q.fill('10'); await q.press('Tab');
+  await page.waitForTimeout(400);
+  await page.click('.nav-btn[data-tab="config"]');
+  await page.locator('#class-list .class-row').first().locator('[data-f="type"]').selectOption('rendafixa');
+  await page.waitForSelector('.modal-back.show');
+  check(/continua R\$\s*662,10/.test(await txt(page, '#modal')), 'confirmação mostra que o valor continua R$ 662,10');
+  await page.click('.modal .btn-primary');
+  await page.waitForTimeout(400);
+  check(/662,10/.test(await txt(page, '#patrimonio-total')), 'patrimônio continua R$ 662,10 depois de mudar para renda fixa');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 21
+console.log('\n21) Duplo clique em "Registrar" não fecha a confirmação');
+{
+  const page = await openApp('scenario=zerada&run=21');
+  await calcularAporte(page, '300');
+  await page.dblclick('#btn-registrar');
+  await page.waitForTimeout(500);
+  check(await page.locator('.modal-back.show').count() === 1, 'a confirmação continua aberta');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  check(await page.locator('.modal-back.show').count() === 0 && (await dbState(page)).aportes.length === 0, 'Esc cancela sem registrar');
   await page.close();
 }
 
