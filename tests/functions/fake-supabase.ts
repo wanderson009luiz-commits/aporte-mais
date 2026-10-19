@@ -8,7 +8,8 @@ class Q {
   select(_c?: string) { if (this.op !== "select") this.ret = true; return this; }
   eq(c: string, v: any) { this.f.push((r) => r[c] === v); return this; }
   neq(c: string, v: any) { this.f.push((r) => r[c] !== v); return this; }
-  lt(c: string, v: any) { this.f.push((r) => String(r[c]) < String(v)); return this; }
+  // como no SQL: nulo não é menor que nada; número compara como número, o resto como texto
+  lt(c: string, v: any) { this.f.push((r) => r[c] != null && (typeof v === "number" ? Number(r[c]) < v : String(r[c]) < String(v))); return this; }
   gte(c: string, v: any) { this.f.push((r) => String(r[c]) >= String(v)); return this; }
   in(c: string, vs: any[]) { const s = new Set(vs); this.f.push((r) => s.has(r[c])); return this; }
   order(c: string, o: any = {}) { this.ord = c; this.asc = o.ascending !== false; return this; }

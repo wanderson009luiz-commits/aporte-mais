@@ -231,13 +231,37 @@ const byIa = all.filter((x: any) => x.classified_by === "ia");
 check(byIa.length === all.length - 1 && all.length === 3, `item com resposta inválida fica com as regras (${byIa.length} por IA de ${all.length})`);
 check(byIa.every((x: any) => typeof x.summary === "string" && x.summary.length > 10), "resumo da IA gravado");
 check(all.find((x: any) => /Lista/.test(x.title))?.relevant === false, "menção em lista marcada como indireta");
+check(byIa.every((x: any) => x.ai_version === MA.AI_VERSION) && all.find((x: any) => x.classified_by === "regras")?.ai_version === 0, `versão das instruções gravada (IA = ${MA.AI_VERSION}, regras = 0)`);
+{
+  const sys = req0.body.system as string;
+  check(/SEMPRE em relação ao "ativo"/.test(sys) && /ETF/.test(sys) && /use "neutro"/.test(sys) && /não invente/.test(sys),
+    "instruções v2: avalia o ativo do item, ETF conta o índice, neutro quando o título não diz, resumo sem inventar");
+}
 // atualização: notícia antiga por regras ganha a leitura da IA no modo agendado
 aiMode = "ok";
 const reg = all.find((x: any) => x.classified_by === "regras");
 g.__DB.ticker_news_checks = g.__DB.ticker_news_checks.filter((c: any) => c.ticker !== "#NEWS").map((c: any) => ({ ...c, checked_at: ago(0.1) }));
 r = await call(withClaude, undefined);
 j = await r.json();
-check(j.upgraded >= 1 && news().find((x: any) => x.id === reg.id)?.classified_by === "ia", "agendado: notícia classificada por regras é reclassificada pela IA");
+check(j.upgraded >= 1 && news().find((x: any) => x.id === reg.id)?.classified_by === "ia" && news().find((x: any) => x.id === reg.id)?.ai_version === MA.AI_VERSION, "agendado: notícia classificada por regras é reclassificada pela IA");
+// instruções novas: o que a IA leu com instruções antigas é relido; o atual e o de mais de 10 dias, não
+{
+  const row = (id: string, ticker: string, title: string, h: number, by: string, v: number, summary: string | null) =>
+    ({ id, ticker, title, url: "https://x", source: "A", published_at: ago(h), impact: "baixo", direction: "neutro", relevant: false, summary, classified_by: by, ai_version: v, fetched_at: ago(h) });
+  reset({ ticker_news: [
+    row("v1", "IVVB11", "S&P 500 renova recorde com balanços de tecnologia", 5, "ia", 1, "resumo da versão antiga"),
+    row("atual", "VALE3", "Vale tem lucro recorde", 4, "ia", MA.AI_VERSION, "resumo atual"),
+    row("antiga", "VALE3", "Vale de 12 dias atrás", 24 * 12, "regras", 0, null),
+  ] });
+  aiBodies = [];
+  const jj = await (await call(withClaude, undefined)).json();
+  const get = (id: string) => news().find((x: any) => x.id === id);
+  check(jj.upgraded === 1 && get("v1")?.ai_version === MA.AI_VERSION && get("v1")?.summary !== "resumo da versão antiga" && get("v1")?.relevant === true,
+    `lida por instruções antigas da IA → relida (${JSON.stringify(jj)})`);
+  check(get("atual")?.summary === "resumo atual" && get("antiga")?.classified_by === "regras", "já lida pelas instruções atuais e com mais de 10 dias: não relidas");
+  const sent = JSON.parse(aiBodies[0]?.body.messages[0].content.replace(/^Itens:\n/, "") ?? "[]");
+  check(sent.length === 1 && /S&P 500/.test(sent[0].sobre ?? ""), "ETF vai para a IA com o índice que ele replica");
+}
 aiMode = "down";
 reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "VALE3" }] });
 FEEDS.VALE3 = rss([{ title: "Vale corta dividendos (ruim)", source: "X", h: 1 }]);
@@ -262,7 +286,7 @@ aiBodies = [];
 reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "WEGE3" }] });
 FEEDS.WEGE3 = rss([{ title: "WEG tem lucro recorde", source: "Valor", h: 1 }]);
 await call(withGemini, { tickers: ["WEGE3"] }, "USER-TOKEN");
-check(aiBodies.length === 2 && news("WEGE3")[0]?.classified_by === "regras", "todos os modelos falhando (404, 429): grava pelas regras, sem erro");
+check(aiBodies.length === 2 && news("WEGE3")[0]?.classified_by === "regras" && news("WEGE3")[0]?.ai_version === 0, "todos os modelos falhando (404, 429): grava pelas regras, sem erro");
 delete GEMINI_STATUS["gemini-3.5-flash-lite"]; delete GEMINI_STATUS["gemini-flash-latest"];
 GEMINI_STATUS["gemini-3.5-flash-lite"] = 503;
 aiBodies = [];
@@ -272,7 +296,7 @@ r = await call(withGemini, { tickers: ["VALE3"] }, "USER-TOKEN");
 j = await r.json();
 check(aiBodies[1].headers["x-goog-api-key"] === "gm-test" && aiBodies[1].body.generationConfig.responseMimeType === "application/json", "chave no cabeçalho e resposta em JSON");
 delete GEMINI_STATUS["gemini-3.5-flash-lite"];
-check(news("VALE3")[0]?.classified_by === "ia" && news("VALE3")[0]?.direction === "positivo", "notícia classificada pela IA do Google");
+check(news("VALE3")[0]?.classified_by === "ia" && news("VALE3")[0]?.direction === "positivo" && news("VALE3")[0]?.ai_version === MG.AI_VERSION, "notícia classificada pela IA do Google");
 
 console.log("10) limites: por pessoa por hora, no total, e no máximo 150 tickers por pessoa");
 {
