@@ -539,7 +539,14 @@ async function handleConflict(remoteUpdatedAt) {
 }
 window.addEventListener('beforeunload', (e) => { if (!reloadingForConflict && (dirty || saving)) { if (!conflict) saveNow(); e.preventDefault(); e.returnValue = ''; } });
 
+let syncingTickers = null;
+/** Uma sincronização por vez: chamadas que chegam durante uma em andamento esperam e conferem de novo. */
 async function syncTrackedTickers() {
+  while (syncingTickers) await syncingTickers.catch(() => {});
+  syncingTickers = syncTrackedTickersNow();
+  try { await syncingTickers; } finally { syncingTickers = null; }
+}
+async function syncTrackedTickersNow() {
   if (!stateLoaded) return;
   const keys = [...new Set(trackedTickers(state).map((t) => quoteKey(t.source, t.ticker)))].sort();
   const sig = keys.join(',');
@@ -702,12 +709,17 @@ const newsAiOn = () => (newsAi !== null ? newsAi : newsRows.some((n) => n.byAi))
 async function readNews(keys) {
   const since = new Date(Date.now() - NEWS_WINDOW_DAYS * 864e5).toISOString();
   const rows = []; const checks = new Map();
-  for (let i = 0; i < keys.length; i += 100) {
-    const part = keys.slice(i, i + 100);
-    const { data, error } = await sb.from('ticker_news').select('id, ticker, title, url, source, published_at, impact, direction, relevant, summary, classified_by')
-      .in('ticker', part).gte('published_at', since).order('published_at', { ascending: false }).limit(1000);
-    if (error) throw error;
-    rows.push(...(data || []));
+  for (let i = 0; i < keys.length; i += 50) {
+    const part = keys.slice(i, i + 50);
+    // em páginas de 1.000 (o limite do servidor): nenhuma notícia — nem alerta — some por excesso de outras
+    for (let page = 0; page < 30; page++) {
+      const { data, error } = await sb.from('ticker_news').select('id, ticker, title, url, source, published_at, impact, direction, relevant, summary, classified_by')
+        .in('ticker', part).gte('published_at', since).order('published_at', { ascending: false }).order('id', { ascending: true })
+        .range(page * 1000, page * 1000 + 999);
+      if (error) throw error;
+      rows.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
     const { data: ch, error: e2 } = await sb.from('ticker_news_checks').select('ticker, checked_at').in('ticker', part);
     if (e2) throw e2;
     (ch || []).forEach((r) => checks.set(r.ticker, Date.parse(r.checked_at)));

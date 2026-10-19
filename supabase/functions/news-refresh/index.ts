@@ -43,10 +43,19 @@ const CRON_BUDGET_MS = 100e3;
 const DEMAND_BUDGET_MS = 25e3;
 const MAX_DEMAND = 20;
 const MAX_REQUESTED = 120;
+const MAX_TRACKED_PER_USER = 150;        // carteira real tem bem menos; acima disso, só os 150 primeiros
 const CONCURRENCY = 4;
 const FETCH_MS = 8000;
+const MAX_XML = 600000;                  // RSS maior que isso é cortado (o do Google tem ~40 KB)
 const AI_BATCH = 30;
 const AI_MS = 45e3;
+// limites por hora do modo sob demanda (proteção de custo e da fonte): por pessoa e no total
+const HOUR = 3600e3;
+const USER_CALLS_PER_HOUR = 6;
+const USER_FETCH_PER_HOUR = 60;
+const GLOBAL_FETCH_PER_HOUR = 400;
+const GLOBAL_AI_PER_HOUR = 30;
+const GLOBAL_ID = "00000000-0000-0000-0000-000000000000";
 
 type Kind = "b3" | "us" | "crypto";
 type Impact = "baixo" | "medio" | "alto";
@@ -144,9 +153,19 @@ function decode(s: string): string {
     return ENT[e.toLowerCase()] ?? m;
   });
 }
-/** Texto limpo: sem tags, sem caracteres de controle, espaços normais. */
+/** Texto limpo: sem tags, sem caracteres de controle, espaços normais, sem "meio caractere". */
 export function cleanText(s: string): string {
-  return decode(s).replace(/<[^>]*>/g, " ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+  return wellFormed(decode(s)).replace(/<[^>]*>/g, " ").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+}
+/** Troca metades soltas de emoji (surrogates sem par) por "?": o banco recusa texto malformado. */
+export function wellFormed(s: string): string {
+  const t = s as any;
+  return typeof t.toWellFormed === "function" ? t.toWellFormed() : Array.from(s).map((ch) => (ch.length === 1 && ch.charCodeAt(0) >= 0xd800 && ch.charCodeAt(0) <= 0xdfff ? "?" : ch)).join("");
+}
+/** Corta em n caracteres de verdade (não corta um emoji ao meio). */
+export function cut(s: string, n: number): string {
+  const arr = Array.from(wellFormed(s));
+  return arr.length <= n ? arr.join("") : arr.slice(0, n).join("");
 }
 function tag(block: string, name: string): string {
   const m = block.match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)</${name}>`, "i"));
@@ -158,13 +177,13 @@ export function parseRss(xml: string, max = 40): RawNews[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(xml)) && out.length < max) {
     const b = m[1];
-    const source = cleanText(tag(b, "source")).slice(0, 80) || null;
+    const source = cut(cleanText(tag(b, "source")), 80) || null;
     let title = cleanText(tag(b, "title"));
     if (source && title.toLowerCase().endsWith(" - " + source.toLowerCase())) title = title.slice(0, title.length - source.length - 3).trim();
-    const url = decode(tag(b, "link")).trim();
+    const url = wellFormed(decode(tag(b, "link")).trim());
     const pub = Date.parse(cleanText(tag(b, "pubDate")));
     if (!title || title.length < 8 || !/^https:\/\/[^\s"'<>]+$/i.test(url) || url.length > 2000 || !Number.isFinite(pub)) continue;
-    out.push({ title: title.slice(0, 300), url, source, published: new Date(pub).toISOString() });
+    out.push({ title: cut(title, 300), url, source, published: new Date(pub).toISOString() });
   }
   return out;
 }
@@ -263,6 +282,17 @@ export const RULES: [RegExp, Impact, Direction][] = [
   [/despenc\w*|desab\w*|derret\w*|afund\w*|tomb\w*|ca[ei]\w* (?:\d|e |abaixo|para|ate|forte)|\bcaem\b|recu\w* \d|queda de \d|desvaloriz\w*|acende alerta|sob pressao|pressiona\w*|menor nivel|\bperde[m]?\b|saidas? de|plunges?|tumbles?|sinks?|slides?|maiores quedas/, "baixo", "negativo"],
 ];
 
+/**
+ * Junta a leitura da IA com a das regras: se as regras acharam algo de impacto alto no título do
+ * próprio ativo (recuperação judicial, corte de dividendos…), a IA não pode rebaixar — um título
+ * manipulado no mesmo lote não consegue esconder um alerta grave.
+ */
+export function mergeAi(ai: Classified | undefined, rules: Classified): Classified {
+  if (!ai) return rules;
+  if (rules.impact === "alto" && rules.relevant) return { ...ai, impact: "alto", relevant: true };
+  return ai;
+}
+
 export function classifyRules(title: string, a: Asset): Classified {
   const n = normTitle(title);
   const relevant = mentions(title, a);
@@ -303,7 +333,7 @@ export function parseAiItems(raw: unknown, n: number): Map<number, Classified> {
     const relevante = (x as any)?.relevante;
     if (!Number.isInteger(i) || i < 0 || i >= n || out.has(i)) continue;
     if (!IMPACTS.includes(impacto) || !DIRECTIONS.includes(direcao) || typeof relevante !== "boolean") continue;
-    const resumo = cleanText(String((x as any)?.resumo ?? "")).slice(0, 200);
+    const resumo = cut(cleanText(String((x as any)?.resumo ?? "")), 200);
     out.set(i, { impact: impacto, direction: direcao, relevant: relevante, summary: resumo.length >= 10 ? resumo : null, by: "ia" });
   }
   return out;
@@ -352,13 +382,16 @@ async function callGemini(items: AiItem[], ms: number): Promise<unknown> {
   return null;
 }
 
-/** Classifica com IA, em lotes; devolve só o que veio válido. */
-export async function classifyAi(list: { asset: Asset; news: RawNews }[], maxCalls: number, ms = AI_MS): Promise<{ map: Map<number, Classified>; calls: number }> {
+/** Classifica com IA, em lotes; devolve só o que veio válido. Cada chamada respeita o prazo da rodada. */
+export async function classifyAi(list: { asset: Asset; news: RawNews }[], maxCalls: number, deadline = Date.now() + AI_MS): Promise<{ map: Map<number, Classified>; calls: number }> {
   const provider = aiProvider();
   const map = new Map<number, Classified>();
   let calls = 0;
   if (!provider) return { map, calls };
   for (let start = 0; start < list.length && calls < maxCalls; start += AI_BATCH) {
+    const remaining = deadline - Date.now();
+    if (remaining < 6000) break; // sem tempo: o resto fica com as regras e é revisto na próxima rodada
+    const ms = Math.min(AI_MS, remaining - 2000);
     const slice = list.slice(start, start + AI_BATCH);
     const items: AiItem[] = slice.map((x, k) => ({
       i: k, ativo: x.asset.ticker, tipo: KIND_TXT[x.asset.kind], ...(NAMES[x.asset.ticker] ? { nome: NAMES[x.asset.ticker][0] } : {}),
@@ -384,7 +417,7 @@ async function fetchNews(a: Asset): Promise<RawNews[] | null> {
   try {
     const r = await fetch(rssUrl(a), { headers: { "User-Agent": UA, "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.5" }, signal: AbortSignal.timeout(FETCH_MS) });
     if (!r.ok) { await r.body?.cancel(); console.error("rss", a.key, r.status); return null; }
-    const xml = await r.text();
+    const xml = (await r.text()).slice(0, MAX_XML);
     if (!/<rss[\s>]/i.test(xml.slice(0, 500))) return null;
     return parseRss(xml);
   } catch (e) { console.error("rss", a.key, String(e)); return null; }
@@ -394,7 +427,7 @@ async function fetchNews(a: Asset): Promise<RawNews[] | null> {
  * Verifica as notícias de uma lista de ativos: busca, escolhe, classifica as novas e grava.
  * Para antes do prazo; o que não deu tempo fica para a próxima.
  */
-export async function refresh(supabase: any, assets: Asset[], deadline: number, maxAiCalls: number, aiMs = AI_MS) {
+export async function refresh(supabase: any, assets: Asset[], deadline: number, maxAiCalls: number) {
   const stats = { checked: 0, failed: 0, found: 0, inserted: 0, byAi: 0, aiCalls: 0 };
   const fetched: { asset: Asset; items: RawNews[] }[] = [];
   let consecutiveFails = 0;
@@ -419,26 +452,32 @@ export async function refresh(supabase: any, assets: Asset[], deadline: number, 
   const seen = new Set<string>();
   const fresh = candidates.filter((c) => !existing.has(c.id) && !seen.has(c.id) && seen.add(c.id));
   // a IA só entra se ainda houver tempo; o que ela não classificar fica com as regras (e é revisto depois)
-  const ai = Date.now() < deadline - 3000 ? await classifyAi(fresh, maxAiCalls, Math.min(aiMs, Math.max(3000, deadline - Date.now()))) : { map: new Map(), calls: 0 };
+  const ai = maxAiCalls > 0 ? await classifyAi(fresh, maxAiCalls, deadline) : { map: new Map<number, Classified>(), calls: 0 };
   stats.aiCalls = ai.calls;
   const rows: NewsRow[] = fresh.map((c, k) => {
-    const cl = ai.map.get(k) ?? classifyRules(c.news.title, c.asset);
+    const cl = mergeAi(ai.map.get(k), classifyRules(c.news.title, c.asset));
     if (cl.by === "ia") stats.byAi++;
     return { id: c.id, ticker: c.asset.key, title: c.news.title, url: c.news.url, source: c.news.source, published_at: c.news.published,
       impact: cl.impact, direction: cl.direction, relevant: cl.relevant, summary: cl.summary, classified_by: cl.by, fetched_at: now };
   });
+  // grava em blocos; se um bloco for recusado, tenta linha a linha — uma notícia ruim não derruba as outras
   for (let i = 0; i < rows.length; i += 100) {
-    const { error } = await supabase.from("ticker_news").upsert(rows.slice(i, i + 100), { onConflict: "id", ignoreDuplicates: true });
-    if (error) throw error;
+    const chunk = rows.slice(i, i + 100);
+    const { error } = await supabase.from("ticker_news").upsert(chunk, { onConflict: "id", ignoreDuplicates: true });
+    if (!error) { stats.inserted += chunk.length; continue; }
+    console.error("ticker_news bloco recusado", error.message ?? error);
+    for (const row of chunk) {
+      const { error: e1 } = await supabase.from("ticker_news").upsert([row], { onConflict: "id", ignoreDuplicates: true });
+      if (e1) console.error("ticker_news linha recusada", row.ticker, e1.message ?? e1); else stats.inserted++;
+    }
   }
-  stats.inserted = rows.length;
   // só quem a fonte respondeu conta como verificado (quem falhou tenta de novo na próxima rodada)
   const checks = fetched.map((f) => ({ ticker: f.asset.key, checked_at: now, found: f.items.length, ok: true }));
   if (checks.length) {
     const { error } = await supabase.from("ticker_news_checks").upsert(checks, { onConflict: "ticker" });
-    if (error) throw error;
+    if (error) console.error("ticker_news_checks", error.message ?? error);
+    else stats.checked = checks.length;
   }
-  stats.checked = checks.length;
   return stats;
 }
 
@@ -451,9 +490,10 @@ async function upgradeWithAi(supabase: any, deadline: number, maxCalls: number) 
   if (error || !data?.length) return 0;
   const list = (data as any[]).map((r) => ({ asset: fromKey(r.ticker), news: { title: r.title, url: r.url, source: r.source, published: r.published_at } as RawNews, id: r.id }))
     .filter((x) => x.asset) as { asset: Asset; news: RawNews; id: string }[];
-  const ai = await classifyAi(list, maxCalls);
+  const ai = await classifyAi(list, maxCalls, deadline);
   let n = 0;
-  for (const [k, cl] of ai.map) {
+  for (const [k, raw] of ai.map) {
+    const cl = mergeAi(raw, classifyRules(list[k].news.title, list[k].asset));
     const { error: e } = await supabase.from("ticker_news").update({ impact: cl.impact, direction: cl.direction, relevant: cl.relevant, summary: cl.summary, classified_by: "ia" })
       .eq("id", list[k].id).eq("classified_by", "regras");
     if (!e) n++;
@@ -473,6 +513,16 @@ async function claimCronSlot(supabase: any): Promise<boolean> {
     .upsert([{ ticker: "#NEWS", checked_at: now.toISOString(), found: 0, ok: true }], { onConflict: "ticker", ignoreDuplicates: true }).select("ticker");
   if (e2) { console.error("cron claim insert", e2); return false; }
   return !!(ins && ins.length);
+}
+
+type Budget = { user_id: string; window_start: string; calls: number; fetched: number; ai_calls: number };
+/** Uso da última hora (por pessoa, ou o total na linha GLOBAL_ID). Sem a tabela, devolve null. */
+async function budgetOf(supabase: any, id: string): Promise<Budget | null> {
+  const { data, error } = await supabase.from("news_demand").select("user_id, window_start, calls, fetched, ai_calls").eq("user_id", id).maybeSingle();
+  if (error) { console.error("news_demand", error.message ?? error); return null; }
+  const now = Date.now();
+  if (!data || !(now - Date.parse(data.window_start) < HOUR)) return { user_id: id, window_start: new Date(now).toISOString(), calls: 0, fetched: 0, ai_calls: 0 };
+  return { user_id: id, window_start: data.window_start, calls: Number(data.calls) || 0, fetched: Number(data.fetched) || 0, ai_calls: Number(data.ai_calls) || 0 };
 }
 
 async function checksFor(supabase: any, keys: string[]) {
@@ -514,12 +564,28 @@ Deno.serve(async (req) => {
         if (e2) throw e2;
         (tt ?? []).forEach((r: any) => mine.add(String(r.ticker).toUpperCase()));
       }
-      const assets = [...wanted.values()].filter((a) => mine.has(a.key));
+      const allowedKeys = new Set([...mine].sort().slice(0, MAX_TRACKED_PER_USER));
+      const assets = [...wanted.values()].filter((a) => allowedKeys.has(a.key));
       const checks = await checksFor(supabase, assets.map((a) => a.key));
       const due = dueFirst(assets, checks, started);
-      const batch = due.slice(0, MAX_DEMAND);
-      const stats = batch.length ? await refresh(supabase, batch, started + DEMAND_BUDGET_MS, 1, 20e3) : { checked: 0, failed: 0, found: 0, inserted: 0, byAi: 0, aiCalls: 0 };
-      return json(req, { ok: true, mode: "app", ai: aiProvider() !== null, requested: wanted.size, allowed: assets.length, due: due.length, ...stats, pending: Math.max(0, due.length - stats.checked) });
+      const empty = { checked: 0, failed: 0, found: 0, inserted: 0, byAi: 0, aiCalls: 0 };
+      const base = { ok: true, mode: "app", ai: aiProvider() !== null, requested: wanted.size, allowed: assets.length, due: due.length };
+      if (!due.length) return json(req, { ...base, ...empty, pending: 0 });
+      // limites da última hora: por pessoa e no total (sem a tabela de controle, o modo fica bem contido)
+      const [ub, gb] = await Promise.all([budgetOf(supabase, auth.user.id), budgetOf(supabase, GLOBAL_ID)]);
+      const room = ub && gb ? Math.min(MAX_DEMAND, USER_FETCH_PER_HOUR - ub.fetched, GLOBAL_FETCH_PER_HOUR - gb.fetched) : 10;
+      const aiRoom = ub && gb && ub.calls < USER_CALLS_PER_HOUR && gb.ai_calls < GLOBAL_AI_PER_HOUR ? 1 : 0;
+      if ((ub && ub.calls >= USER_CALLS_PER_HOUR) || room <= 0) return json(req, { ...base, ...empty, throttled: true, pending: due.length });
+      const batch = due.slice(0, room);
+      const stats = await refresh(supabase, batch, started + DEMAND_BUDGET_MS, aiRoom);
+      if (ub && gb) {
+        const { error: eb } = await supabase.from("news_demand").upsert([
+          { ...ub, calls: ub.calls + 1, fetched: ub.fetched + batch.length, ai_calls: ub.ai_calls + stats.aiCalls },
+          { ...gb, calls: gb.calls + 1, fetched: gb.fetched + batch.length, ai_calls: gb.ai_calls + stats.aiCalls },
+        ], { onConflict: "user_id" });
+        if (eb) console.error("news_demand", eb.message ?? eb);
+      }
+      return json(req, { ...base, ...stats, pending: Math.max(0, due.length - stats.checked) });
     }
 
     // ---------- agendado (cron) ----------

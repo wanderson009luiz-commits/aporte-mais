@@ -341,7 +341,7 @@ export function migrateState(input) {
       classId: str(x.classId, 64), assetId: x.assetId == null ? null : str(x.assetId, 64),
       field: x.field === 'qty' ? 'qty' : 'currentValue', amount: num(x.amount), label: str(x.label, 60),
       value: x.value == null ? undefined : num(x.value), currency: CURRENCIES.includes(x.currency) ? x.currency : undefined,
-      epoch: num(x.epoch) > 0 ? Math.min(1e6, Math.round(num(x.epoch))) : undefined,
+      epoch: Math.round(num(x.epoch)) > 0 ? Math.min(1e6, Math.round(num(x.epoch))) : undefined, // arredonda antes: 0,4 vira "sem época" já na 1ª vez
     })) : undefined,
     prevLastAporteDate: isISODate(a.prevLastAporteDate) ? a.prevLastAporteDate : null,
   }));

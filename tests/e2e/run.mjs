@@ -744,6 +744,21 @@ console.log('\n26) Notícias: só da carteira, impacto e boa/ruim, alertas no Pa
   await f.waitForFunction(() => /Não deu para buscar|Nenhuma notícia/.test(document.querySelector('#tab-noticias')?.textContent || ''), null, { timeout: 8000 });
   check(/Não deu para buscar notícias novas agora/.test(await txt(f, '#news-status')), 'função fora do ar: aviso claro, sem quebrar a tela');
   await f.close();
+  // muitas notícias recentes de um ativo não podem esconder o alerta (mais antigo) de outro
+  const g = await newPage('scenario=zerada&run=30');
+  await g.waitForSelector('#app-root:not([style*="none"])');
+  await g.waitForFunction(() => !document.querySelector('#news-badge')?.hidden, null, { timeout: 8000 });
+  await g.evaluate(() => {
+    const db = window.__fakeDb();
+    for (let k = 0; k < 1300; k++) db.ticker_news.unshift({ id: 'x' + k, ticker: 'WEGE3', title: `WEG notícia de rotina número ${k} sobre a fábrica`, url: 'https://news.google.com/rss/articles/X' + k, source: 'Fonte', published_at: new Date(Date.now() - (0.1 + k / 1000) * 3600e3).toISOString(), impact: 'baixo', direction: 'neutro', relevant: true, summary: null, classified_by: 'regras', fetched_at: new Date().toISOString() });
+    sessionStorage.setItem('fake-db-zerada-30', JSON.stringify(db));
+  });
+  await g.reload();
+  await g.waitForSelector('#app-root:not([style*="none"])');
+  await g.waitForFunction(() => !document.querySelector('#news-badge')?.hidden, null, { timeout: 8000 });
+  check((await txt(g, '#news-badge')) === '2', 'com 1.300 notícias recentes de outro ativo, os 2 alertas continuam no menu');
+  check(/rompimento de barragem/.test(await txt(g, '#painel-container')), 'e o alerta da VALE3 continua no Painel');
+  await g.close();
 }
 
 console.log(`\n${passes} ok, ${failures} falha(s)`);

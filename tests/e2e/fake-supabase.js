@@ -40,6 +40,7 @@
     gte(c, v) { this.f.push((r) => String(r[c]) >= String(v)); return this; }
     order() { return this; }
     limit(n) { this.lim = n; return this; }
+    range(a, b) { this.rng = [a, b]; return this; }
     maybeSingle() { this.maybe = true; return this; }
     single() { this.one = true; return this; }
     insert(rows) { this.op = 'insert'; this.payload = [].concat(rows); return this; }
@@ -70,6 +71,7 @@
       } else if (this.op === 'delete') {
         db[this.t] = tbl.filter((r) => !match(r)); persist();
       }
+      if (this.op === 'select') out = this.rng ? out.slice(this.rng[0], this.rng[1] + 1) : out.slice(0, 1000); // máximo de linhas do PostgREST
       if (this.lim) out = out.slice(0, this.lim);
       if (this.one) return out.length ? { data: out[0], error: null } : { data: null, error: { message: 'no rows' } };
       if (this.maybe) return { data: out[0] || null, error: null };

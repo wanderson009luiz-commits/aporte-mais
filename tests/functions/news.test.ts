@@ -35,7 +35,7 @@ g.fetch = async (url: string, init?: any) => {
     const text = u.host === "api.anthropic.com" ? body.messages[0].content : body.contents[0].parts[0].text;
     const items = JSON.parse(text.replace(/^Itens:\n/, ""));
     const itens = items.map((x: any) => ({
-      i: x.i, relevante: !/lista/i.test(x.titulo), impacto: /alto/i.test(x.titulo) ? "alto" : "medio", direcao: /ruim|corta/i.test(x.titulo) ? "negativo" : "positivo",
+      i: x.i, relevante: !/lista/i.test(x.titulo), impacto: /\(baixo\)/i.test(x.titulo) ? "baixo" : /alto/i.test(x.titulo) ? "alto" : "medio", direcao: /ruim|corta/i.test(x.titulo) ? "negativo" : "positivo",
       resumo: `Resumo de teste para ${x.ativo}: o que aconteceu e por que importa.`,
     }));
     if (aiMode === "bad" && itens.length) itens[0].impacto = "enorme"; // item inválido: fica com as regras
@@ -253,6 +253,57 @@ j = await r.json();
 check(aiBodies.length === 2 && aiBodies[0].path.includes("gemini-flash-latest") && aiBodies[1].path.includes("gemini-3.5-flash-lite"), "primeiro modelo 404 → usa o seguinte");
 check(aiBodies[1].headers["x-goog-api-key"] === "gm-test" && aiBodies[1].body.generationConfig.responseMimeType === "application/json", "chave no cabeçalho e resposta em JSON");
 check(news("VALE3")[0]?.classified_by === "ia" && news("VALE3")[0]?.direction === "positivo", "notícia classificada pela IA do Google");
+
+console.log("10) limites: por pessoa por hora, no total, e no máximo 150 tickers por pessoa");
+{
+  const many = Array.from({ length: 100 }, (_, k) => "T" + String(k).padStart(3, "0") + "3");
+  reset({ tracked_tickers: many.map((t2) => ({ portfolio_id: "p1", ticker: t2 })) });
+  const fetchedPer: number[] = [];
+  for (let c = 0; c < 4; c++) { rssCalls = []; const rr = await call(withGemini, { tickers: many }, "USER-TOKEN"); const jj = await rr.json(); fetchedPer.push(rssCalls.length); if (c === 3) check(jj.throttled === true, "4ª chamada na hora: limite de 60 buscas por pessoa atingido"); }
+  check(fetchedPer.slice(0, 3).every((n) => n === 20) && fetchedPer[3] === 0, `buscas por chamada: ${fetchedPer.join(", ")}`);
+  const ub = g.__DB.news_demand.find((r: any) => r.user_id === "u1");
+  const gb = g.__DB.news_demand.find((r: any) => r.user_id === "00000000-0000-0000-0000-000000000000");
+  check(ub?.fetched === 60 && ub?.calls === 3 && gb?.fetched === 60, "uso da hora registrado por pessoa e no total");
+  // a janela vira depois de 1 hora
+  ub.window_start = new Date(Date.now() - 61 * 60e3).toISOString();
+  rssCalls = [];
+  await call(withGemini, { tickers: many }, "USER-TOKEN");
+  check(rssCalls.length === 20, "na hora seguinte volta a buscar");
+  // no máximo 6 chamadas que buscam por hora, mesmo com poucos tickers por chamada
+  reset({ tracked_tickers: many.slice(0, 10).map((t2) => ({ portfolio_id: "p1", ticker: t2 })) });
+  let thr = false;
+  for (let c = 0; c < 7; c++) { const jj = await (await call(withGemini, { tickers: [many[c]] }, "USER-TOKEN")).json(); if (c === 6) thr = jj.throttled === true; }
+  check(thr, "7ª chamada na hora: limite de 6 por pessoa");
+  // no máximo 150 tickers por pessoa
+  const huge = Array.from({ length: 200 }, (_, k) => "Z" + String(k).padStart(3, "0") + "3");
+  reset({ tracked_tickers: huge.map((t2) => ({ portfolio_id: "p1", ticker: t2 })) });
+  const jj = await (await call(withGemini, { tickers: huge.slice(180) }, "USER-TOKEN")).json();
+  check(jj.allowed === 0, "tickers além dos 150 primeiros da pessoa não são buscados");
+  // IA: orçamento total da hora esgotado → regras
+  aiBodies = [];
+  reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "VALE3" }], news_demand: [{ user_id: "00000000-0000-0000-0000-000000000000", window_start: new Date().toISOString(), calls: 0, fetched: 0, ai_calls: 30 }] });
+  FEEDS.VALE3 = rss([{ title: "Vale tem lucro recorde", source: "InfoMoney", h: 1 }]);
+  await call(withGemini, { tickers: ["VALE3"] }, "USER-TOKEN");
+  check(aiBodies.length === 0 && news("VALE3")[0]?.classified_by === "regras", "orçamento de IA da hora esgotado: classifica por regras, sem chamar a IA");
+}
+
+console.log("11) texto malformado, linha recusada e rede de segurança da IA");
+{
+  const longo = "MXRF11 " + "a".repeat(292) + "😀 fim";
+  const it = M.parseRss(rss([{ title: longo, source: "X", h: 1 }]))[0];
+  check(it.title.isWellFormed() && Array.from(it.title).length === 300, `título cortado sem quebrar o emoji (${Array.from(it.title).length} caracteres)`);
+  check(M.cut("ab😀cd", 3) === "ab😀" && M.wellFormed("x" + String.fromCharCode(0xd83d)) === "x" + String.fromCharCode(0xfffd), "corte por caractere e metade solta trocada");
+  reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "MXRF11" }] });
+  FEEDS.MXRF11 = rss([{ title: "MXRF11 notícia boa de rendimentos", source: "A", h: 1 }, { title: "MXRF11 REJEITAR esta linha do banco", source: "B", h: 2 }, { title: "MXRF11 anuncia dividendos de R$ 0,10", source: "C", h: 3 }]);
+  const jj = await (await call(plain, { tickers: ["MXRF11"] }, "USER-TOKEN")).json();
+  check(jj.ok && news("MXRF11").length === 2 && jj.inserted === 2 && jj.checked === 1, "linha recusada pelo banco não derruba as outras nem a verificação");
+  const merged = MA.mergeAi({ impact: "baixo", direction: "neutro", relevant: false, summary: "resumo manipulado do título", by: "ia" }, MA.classifyRules("MXRF11 suspende distribuição de rendimentos", MA.fromKey("MXRF11")!));
+  check(merged.impact === "alto" && merged.relevant === true && merged.by === "ia", "IA não rebaixa um alerta grave que as regras acharam no título do ativo");
+  Deno.env.set("ANTHROPIC_API_KEY", "sk-test");
+  aiBodies = [];
+  const r0 = await MA.classifyAi([{ asset: MA.fromKey("VALE3")!, news: { title: "Vale tem lucro recorde", url: "https://x", source: "A", published: new Date().toISOString() } }], 3, Date.now() - 1);
+  check(r0.calls === 0 && aiBodies.length === 0, "sem tempo na rodada: não chama a IA");
+}
 
 console.log("9) métodos e corpo inválidos");
 r = await plain(new Request("https://x/functions/v1/news-refresh", { method: "GET" }));

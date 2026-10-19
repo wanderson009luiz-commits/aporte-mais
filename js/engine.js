@@ -200,23 +200,26 @@ export function lotsDeviation(items, xs, budget) {
 
 /** "Quem está mais longe do alvo (em % do alvo) compra primeiro", um lote por vez, enquanto couber. */
 function fillByFraction(items, budget, maxSteps = 4000) {
+  const n = items.length;
   const xs = items.map(() => 0);
+  const cur = items.map((it) => it.v);                                    // valor atual de cada um (centavos)
+  const inc = items.map((it) => costCents(it.price, it.minQty));          // custo do próximo lote
   let L = budget;
   for (let step = 0; ; step++) {
     if (step > maxSteps) return null; // lotes muito baratos para o orçamento: o resultado proporcional já é bom
-    let best = -1, bf = 0, bd = 0, binc = 0;
-    items.forEach((it, k) => {
-      if (!(it.target > 0)) return;
-      const cur = it.v + costCents(it.price, xs[k]);
-      if (cur >= it.target - 0.5) return;
-      const inc = costCents(it.price, xs[k] + it.minQty) - costCents(it.price, xs[k]);
-      if (inc > L || inc <= 0) return;
-      const f = cur / it.target, d = it.target - cur;
-      if (best < 0 || f < bf - 1e-12 || (Math.abs(f - bf) <= 1e-12 && d > bd + 1e-9)) { best = k; bf = f; bd = d; binc = inc; }
-    });
+    let best = -1, bf = 0, bd = 0;
+    for (let k = 0; k < n; k++) {
+      const t = items[k].target;
+      if (!(t > 0) || cur[k] >= t - 0.5 || inc[k] > L || inc[k] <= 0) continue;
+      const f = cur[k] / t, d = t - cur[k];
+      if (best < 0 || f < bf - 1e-12 || (Math.abs(f - bf) <= 1e-12 && d > bd + 1e-9)) { best = k; bf = f; bd = d; }
+    }
     if (best < 0) return xs;
+    L -= inc[best];
     xs[best] += items[best].minQty;
-    L -= binc;
+    const val = costCents(items[best].price, xs[best]);
+    cur[best] = items[best].v + val;
+    inc[best] = costCents(items[best].price, xs[best] + items[best].minQty) - val;
   }
 }
 
@@ -232,48 +235,64 @@ function fillByFraction(items, budget, maxSteps = 4000) {
 export function refineLots(items, budget, start) {
   const n = items.length;
   if (!n || !(budget > 0)) return start.slice();
+  const startDev = lotsDeviation(items, start, budget);
   let xs = start.slice();
-  let best = lotsDeviation(items, xs, budget);
   const alt = fillByFraction(items, budget);
-  if (alt) { const e = lotsDeviation(items, alt, budget); if (e < best) { xs = alt; best = e; } }
+  if (alt && lotsDeviation(items, alt, budget) < startDev) xs = alt;
   const cost = (k, q) => costCents(items[k].price, q);
-  const err = (k) => items[k].v + cost(k, xs[k]) - items[k].target;
-  const eps = 1e-9 * Math.max(1, budget * budget);
-  let spent = xs.reduce((sum, q, k) => sum + cost(k, q), 0);
-  const swaps = n <= 120;
-  for (let iter = 0; iter < 400; iter++) {
+  // estado de cada ativo (só quem muda é recalculado): valor, desvio, custo de +1 lote, devolução de −1 lote
+  const val = xs.map((q, k) => cost(k, q));
+  const err = [], inc = [], dec = [];
+  const refresh = (k) => {
+    val[k] = cost(k, xs[k]);
+    err[k] = items[k].v + val[k] - items[k].target;
+    inc[k] = cost(k, xs[k] + items[k].minQty) - val[k];
+    dec[k] = xs[k] >= items[k].minQty ? val[k] - cost(k, xs[k] - items[k].minQty) : 0;
+  };
+  for (let k = 0; k < n; k++) refresh(k);
+  let spent = val.reduce((sum, v) => sum + v, 0);
+  const EPS = 0.5; // melhora mínima (centavos²) para aceitar uma troca; as contas abaixo não perdem precisão
+  const swaps = n <= 60; // trocas testam todos os pares: só em classes de até 60 ativos (acima, só soma lotes)
+  const under = [];
+  for (let iter = 0; iter < 250; iter++) {
     const L = budget - spent;
-    let bestD = -eps, mv = null;
-    for (let j = 0; j < n; j++) { // somar um lote
-      const ej = err(j);
-      if (!(ej < -0.5)) continue;
-      const inc = cost(j, xs[j] + items[j].minQty) - cost(j, xs[j]);
-      if (inc > L || inc <= 0) continue;
-      const d = inc * (2 * ej + inc) - inc * (2 * L - inc);
-      if (d < bestD) { bestD = d; mv = { i: -1, j, dec: 0, inc }; }
+    under.length = 0;
+    for (let k = 0; k < n; k++) if (err[k] < -0.5 && inc[k] > 0) under.push(k); // só quem está abaixo do alvo recebe lote
+    if (!under.length) break;
+    let bestD = -EPS, mi = -1, mj = -1;
+    for (const j of under) { // somar um lote
+      if (inc[j] > L) continue;
+      const d = inc[j] * (2 * err[j] + inc[j]) - inc[j] * (2 * L - inc[j]);
+      if (d < bestD) { bestD = d; mi = -1; mj = j; }
     }
     if (swaps) for (let i = 0; i < n; i++) { // trocar um lote de i por um lote de j
-      if (xs[i] < items[i].minQty) continue;
-      const dec = cost(i, xs[i]) - cost(i, xs[i] - items[i].minQty);
-      const ei = err(i);
-      const di = -dec * (2 * ei - dec);
-      for (let j = 0; j < n; j++) {
+      const di0 = dec[i];
+      if (!(di0 > 0)) continue;
+      const di = -di0 * (2 * err[i] - di0);
+      const cap = L + di0;
+      for (const j of under) {
         if (j === i) continue;
-        const ej = err(j);
-        if (!(ej < -0.5)) continue;
-        const inc = cost(j, xs[j] + items[j].minQty) - cost(j, xs[j]);
-        if (inc <= 0 || inc > L + dec) continue;
-        const d = di + inc * (2 * ej + inc) + (dec - inc) * (2 * L + dec - inc);
-        if (d < bestD) { bestD = d; mv = { i, j, dec, inc }; }
+        const ij = inc[j];
+        if (ij > cap) continue;
+        const d = di + ij * (2 * err[j] + ij) + (di0 - ij) * (2 * L + di0 - ij);
+        if (d < bestD) { bestD = d; mi = i; mj = j; }
       }
     }
-    if (!mv) break;
-    if (mv.i >= 0) xs[mv.i] -= items[mv.i].minQty;
-    xs[mv.j] += items[mv.j].minQty;
-    spent += mv.inc - mv.dec;
+    if (mj < 0) break;
+    if (mi >= 0) { spent -= dec[mi]; xs[mi] -= items[mi].minQty; refresh(mi); }
+    spent += inc[mj]; xs[mj] += items[mj].minQty; refresh(mj);
+  }
+  // dinheiro parado nunca: o que ainda couber vai, um lote por vez, para quem está mais abaixo do alvo
+  const left = budget - spent;
+  if (left > 0) {
+    const res = fillLots(items.map((it, k) => ({
+      u: -err[k], rem: -err[k], idx: k, lotExact: it.price * 100 * it.minQty,
+      extra: (j) => cost(k, xs[k] + j * it.minQty) - val[k],
+    })), left);
+    res.lots.forEach((m, k) => { if (m > 0) xs[k] += m * items[k].minQty; });
   }
   // trava final: nunca pior que a entrada e nunca acima do orçamento
-  return lotsDeviation(items, xs, budget) <= lotsDeviation(items, start, budget) ? xs : start.slice();
+  return lotsDeviation(items, xs, budget) <= startDev ? xs : start.slice();
 }
 
 /** Planeja a compra de uma classe com ativos. Valores em centavos. */

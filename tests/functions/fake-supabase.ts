@@ -1,6 +1,6 @@
 // Supabase falso (só o que as funções usam), com tabelas em memória em globalThis.__DB
 type Row = Record<string, any>;
-const PK: Record<string, string[]> = { ticker_quotes: ["ticker"], exchange_rates: ["pair"], tracked_tickers: ["portfolio_id", "ticker"], ticker_sentiment: ["ticker", "session_date", "session"], ticker_news: ["id"], ticker_news_checks: ["ticker"], portfolios: ["id"] };
+const PK: Record<string, string[]> = { ticker_quotes: ["ticker"], exchange_rates: ["pair"], tracked_tickers: ["portfolio_id", "ticker"], ticker_sentiment: ["ticker", "session_date", "session"], ticker_news: ["id"], ticker_news_checks: ["ticker"], portfolios: ["id"], news_demand: ["user_id"] };
 const db = () => (globalThis as any).__DB as Record<string, Row[]>;
 class Q {
   t: string; f: ((r: Row) => boolean)[] = []; op = "select"; payload: any = null; opts: any = {}; ret = false; one = false; ord: string | null = null; asc = true; rng: [number, number] | null = null; lim: number | null = null;
@@ -37,6 +37,8 @@ class Q {
     } else if (this.op === "update") {
       tbl.forEach((r) => { if (match(r)) { Object.assign(r, this.payload); out.push({ ...r }); } });
     } else if (this.op === "upsert") {
+      // como o Postgres: um texto que o banco não aceita derruba o bloco inteiro
+      if (this.t === "ticker_news" && this.payload.some((p: Row) => /REJEITAR/.test(String(p.title)) || !String(p.title).isWellFormed())) return { data: null, error: { message: "invalid input" } };
       for (const p of this.payload) {
         const i = tbl.findIndex((x) => key(x) === key(p));
         if (i >= 0) { if (this.opts.ignoreDuplicates) continue; tbl[i] = { ...tbl[i], ...p }; out.push({ ...tbl[i] }); }
