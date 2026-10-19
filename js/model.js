@@ -31,14 +31,34 @@ export const TICKER_CHANGES = {
   MALL11: { to: 'PMLL11', note: 'mudou de nome, gestão e código para PMLL11' },
 };
 
-export function uid() { return Math.random().toString(36).slice(2, 10); }
+export function uid() { return Math.random().toString(36).slice(2, 10).padEnd(8, '0'); }
 
 export function normTicker(t) { return String(t ?? '').trim().toUpperCase(); }
 
+const JS_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+/**
+ * Número de um campo salvo. Aceita números e textos ("1234.56" no formato do JavaScript ou
+ * "1.234,56" / "R$ 1.500,00" no formato brasileiro). Qualquer coisa inválida vira 0.
+ */
+export function toNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (!t) return 0;
+    if (JS_NUMBER.test(t)) { const n = Number(t); return Number.isFinite(n) ? n : 0; }
+    return parseNum(t);
+  }
+  return 0;
+}
+const num = toNumber;
+
 /** Tipo da classe (deduz de versões antigas que não tinham o campo). */
 export function classType(cls) {
-  if (cls && CLASS_TYPES[cls.type]) return cls.type;
-  if (!cls || !cls.hasAssets) return 'valor';
+  if (cls && typeof cls.type === 'string' && Object.prototype.hasOwnProperty.call(CLASS_TYPES, cls.type)) return cls.type;
+  if (!cls || typeof cls !== 'object') return 'valor';
+  // versões antigas: "hasAssets"; se o campo não existe, ter ativos cadastrados já diz que é classe com ativos
+  const has = cls.hasAssets === true || (cls.hasAssets === undefined && Array.isArray(cls.assets) && cls.assets.length > 0);
+  if (!has) return 'valor';
   const id = String(cls.id || '').toLowerCase();
   const name = String(cls.name || '').toLowerCase();
   if (id === 'cripto' || /cript|bitcoin/.test(name)) return 'cripto';
@@ -61,7 +81,7 @@ export function buyMode(cls) {
   if (t === 'rendafixa' || t === 'valor') return 'valor';
   if (t === 'cripto') return 'fracao';
   if (t === 'exterior') return cls.fractional === false ? 'lote' : 'fracao';
-  return cls.fractional === true ? 'fracao' : 'lote'; // b3
+  return 'lote'; // B3: sempre cotas inteiras (o "fracionário" da B3 também negocia cotas inteiras)
 }
 
 export function quoteSource(cls) { return CLASS_TYPES[classType(cls)].quote; }
@@ -78,27 +98,33 @@ export function quoteKey(source, ticker) {
 /** Ticker válido para busca de cotação (evita mandar lixo para as fontes). */
 export function isQuotableTicker(t) { return /^[A-Z0-9][A-Z0-9.\-]{0,14}$/.test(normTicker(t)); }
 
-function num(v) { const n = typeof v === 'number' ? v : parseFloat(v); return Number.isFinite(n) ? n : 0; }
+/**
+ * Preço "limpo": a B3 negocia em centavos (e as fontes às vezes mandam 37,150001525...);
+ * de 1,00 para cima também vale o centavo; abaixo de 1,00 (cripto, centavos de dólar) guarda até 8 casas.
+ */
+export function cleanPrice(cls, p) {
+  const n = num(p);
+  if (!(n > 0)) return 0;
+  if (classType(cls) === 'b3' || n >= 1) return Math.round(n * 100) / 100;
+  return Math.round(n * 1e8) / 1e8;
+}
 
 /**
  * Preço efetivo de um ativo, na moeda da classe.
  * Modo automático (padrão): cotação atual → última cotação real conhecida.
- * Modo manual: preço digitado (se vazio, cai para a cotação).
+ * Modo manual: preço digitado (se vazio, segue a mesma regra do automático).
  * @returns {{price:number, source:'auto'|'cache'|'manual'|'none', quote:object|null}}
  */
 export function assetPrice(cls, a, quotes) {
   if (buyMode(cls) === 'valor') return { price: 0, source: 'none', quote: null };
   const src = quoteSource(cls);
   const q = quotes && src !== 'none' ? quotes[quoteKey(src, a.ticker)] : null;
-  const qOk = q && num(q.price) > 0 && (q.currency || 'BRL') === classCurrency(cls);
-  const manual = num(a.price);
-  const cached = num(a.lastQuotePrice);
-  if (a.priceMode === 'manual') {
-    if (manual > 0) return { price: manual, source: 'manual', quote: qOk ? q : null };
-    if (qOk) return { price: num(q.price), source: 'auto', quote: q };
-    return { price: 0, source: 'none', quote: null };
-  }
-  if (qOk) return { price: num(q.price), source: 'auto', quote: q };
+  const qPrice = q ? cleanPrice(cls, q.price) : 0;
+  const qOk = !!q && qPrice > 0 && (q.currency || 'BRL') === classCurrency(cls);
+  const manual = cleanPrice(cls, a.price);
+  const cached = cleanPrice(cls, a.lastQuotePrice);
+  if (a.priceMode === 'manual' && manual > 0) return { price: manual, source: 'manual', quote: qOk ? q : null };
+  if (qOk) return { price: qPrice, source: 'auto', quote: q };
   // sem cotação agora (fonte fora do ar): só a última cotação real conhecida.
   // Um preço digitado em versões antigas NÃO é usado no automático — pode estar velho
   // (ex.: fundo que deixou de ser negociado). Para usar um preço digitado, fixe-o (modo manual).
@@ -113,7 +139,7 @@ export function isAutoValued(cls, a, quotes) {
 
 /** Valor atual do ativo na moeda da classe (em reais/dólares, não em centavos). */
 export function assetValue(cls, a, quotes) {
-  if (isAutoValued(cls, a, quotes)) return Math.round(num(a.qty) * assetPrice(cls, a, quotes).price * 100) / 100;
+  if (isAutoValued(cls, a, quotes)) return Math.round(num(a.qty) * assetPrice(cls, a, quotes).price * 100 + 1e-7) / 100;
   return Math.max(0, num(a.currentValue));
 }
 
@@ -151,7 +177,7 @@ export function isHundred(sum) { return Math.abs(sum - 100) < 0.005; }
 // Carteira padrão e migração
 // ---------------------------------------------------------------------
 function A(ticker, idealPct) {
-  return { id: uid(), ticker, idealPct, qty: 0, price: 0, priceMode: 'auto', currentValue: 0, minQty: 1, termometro: { nota: null, motivos: [] } };
+  return { id: uid(), ticker, idealPct, qty: 0, price: 0, priceMode: 'auto', currentValue: 0, minQty: 1, minAmount: 0, lastQuotePrice: 0, termometro: { nota: null, motivos: [] } };
 }
 
 export function defaultState() {
@@ -178,30 +204,49 @@ export function defaultState() {
   };
 }
 
-/** Atualiza uma carteira de qualquer versão anterior para a versão atual, sem perder dados. */
+const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+/** Remove campos com valor `undefined` (assim a carteira em memória é igual à salva em JSON). */
+const prune = (o) => { Object.keys(o).forEach((k) => { if (o[k] === undefined) delete o[k]; }); return o; };
+
+/**
+ * Atualiza uma carteira de qualquer versão anterior para a versão atual, sem perder dados.
+ * Nunca altera o objeto recebido. Rodar duas vezes dá o mesmo resultado.
+ * Avisos sobre mudanças que a pessoa precisa saber ficam em `migrationNotes`.
+ */
 export function migrateState(input) {
+  if (!isObj(input) || !Array.isArray(input.classes)) return migrateState(defaultState());
   const d = defaultState();
-  if (!input || typeof input !== 'object' || !Array.isArray(input.classes)) return d;
   const s = JSON.parse(JSON.stringify(input)); // nunca altera o objeto recebido
   const oldVersion = num(s.version);
-  s.classes = s.classes.filter((c) => c && typeof c === 'object');
+  const notes = [];
+  const classIds = new Set();
+  const assetIds = new Set();
+  // identificador estável e único (duplicados ganham um novo — senão a compra iria para o ativo errado)
+  const cleanId = (v, seen) => {
+    const raw = typeof v === 'string' || typeof v === 'number' ? String(v).trim().slice(0, 64) : '';
+    let id = raw && !seen.has(raw) ? raw : uid();
+    while (seen.has(id)) id = uid();
+    seen.add(id);
+    return id;
+  };
+  s.classes = s.classes.filter(isObj).slice(0, 50);
   s.classes.forEach((c) => {
-    if (!c.id) c.id = uid();
-    if (typeof c.name !== 'string') c.name = 'Classe';
+    c.id = cleanId(c.id, classIds);
+    c.name = typeof c.name === 'string' && c.name.trim() ? c.name.trim().slice(0, 40) : 'Classe';
     const t = classType(c);
     c.type = t;
     c.idealPct = Math.max(0, num(c.idealPct));
     c.isCash = c.isCash === true || (c.isCash === undefined && c.id === 'caixa');
-    if (c.isCash) c.type = 'valor';
-    c.currency = classCurrency(c);
-    if (c.fractional === undefined) c.fractional = t === 'cripto' || t === 'exterior';
+    if (typeof c.fractional !== 'boolean') c.fractional = t === 'cripto' || t === 'exterior';
     c.currentValue = Math.max(0, num(c.currentValue));
-    if (!Array.isArray(c.assets)) c.assets = [];
+    c.assets = (Array.isArray(c.assets) ? c.assets : []).filter(isObj).slice(0, 300);
+    // Caixa marcado num tipo "com ativos" mas sem nenhum ativo: é valor direto (nada a esconder)
+    if (c.isCash && CLASS_TYPES[c.type].hasAssets && c.assets.length === 0) c.type = 'valor';
+    c.currency = classCurrency(c);
     c.hasAssets = CLASS_TYPES[c.type].hasAssets; // mantido só para versões antigas do app lerem a carteira
-    c.assets = c.assets.filter((a) => a && typeof a === 'object');
     c.assets.forEach((a) => {
-      if (!a.id) a.id = uid();
-      a.ticker = typeof a.ticker === 'string' ? a.ticker : String(a.ticker ?? '');
+      a.id = cleanId(a.id, assetIds);
+      a.ticker = (typeof a.ticker === 'string' ? a.ticker : String(a.ticker ?? '')).slice(0, 40);
       a.idealPct = Math.max(0, num(a.idealPct));
       a.qty = Math.max(0, num(a.qty));
       a.price = Math.max(0, num(a.price));
@@ -212,20 +257,68 @@ export function migrateState(input) {
       // Versões antigas nunca tiveram cotação automática funcionando: os preços digitados lá
       // viram apenas reserva; o preço automático (mais atual) passa a valer quando existir.
       if (a.priceMode !== 'manual' && a.priceMode !== 'auto') a.priceMode = 'auto';
-      if (!a.termometro || typeof a.termometro !== 'object') a.termometro = { nota: null, motivos: [] };
-      if (a.termometro.nota === undefined) a.termometro.nota = null;
-      if (!Array.isArray(a.termometro.motivos)) a.termometro.motivos = [];
+      if (!isObj(a.termometro)) a.termometro = { nota: null, motivos: [] };
+      const nota = a.termometro.nota === null || a.termometro.nota === '' || a.termometro.nota === undefined ? NaN : Number(a.termometro.nota);
+      a.termometro.nota = Number.isFinite(nota) ? Math.max(0, Math.min(100, Math.round(nota))) : null;
+      a.termometro.motivos = (Array.isArray(a.termometro.motivos) ? a.termometro.motivos : [])
+        .filter((x) => typeof x === 'string').slice(0, 20).map((x) => x.slice(0, 200));
     });
   });
-  // exatamente um caixa
-  let seenCash = false;
-  s.classes.forEach((c) => { if (c.isCash) { if (seenCash) c.isCash = false; else seenCash = true; } });
-  if (!s.agenda || typeof s.agenda !== 'object') s.agenda = d.agenda;
-  if (!s.settings || typeof s.settings !== 'object') s.settings = d.settings;
-  if (!s.settings.fxManual || typeof s.settings.fxManual !== 'object') s.settings.fxManual = { USD: null, EUR: null };
-  if (!Array.isArray(s.aportes)) s.aportes = [];
-  if (!Array.isArray(s.timeline)) s.timeline = [];
-  if (!Array.isArray(s.dividendos)) s.dividendos = [];
+  // Caixa: exatamente um, do tipo "valor direto". NUNCA esconde patrimônio: uma classe com ativos
+  // que estava marcada como Caixa continua com seus ativos e deixa de ser o Caixa; nesse caso um
+  // Caixa de Oportunidade vazio é criado para receber as sobras (e a pessoa é avisada).
+  const flagged = s.classes.filter((c) => c.isCash);
+  const keep = flagged.find((c) => !CLASS_TYPES[c.type].hasAssets) || null;
+  flagged.forEach((c) => { if (c !== keep) c.isCash = false; });
+  if (!keep && flagged.length) {
+    s.classes.push({ id: cleanId('caixa-oportunidade', classIds), name: 'Caixa de Oportunidade', type: 'valor', idealPct: 0, isCash: true,
+      currency: 'BRL', fractional: false, currentValue: 0, assets: [], hasAssets: false });
+    notes.push(`A classe "${flagged[0].name}" estava marcada como Caixa, mas tem ativos. Ela continua igual, com todos os ativos e valores, e foi criado um "Caixa de Oportunidade" para receber as sobras. Se preferir outra organização, ajuste em Configuração.`);
+  }
+  // agenda, ajustes e listas: só formatos válidos (um backup adulterado não pode injetar nada na tela)
+  const g = isObj(s.agenda) ? s.agenda : d.agenda;
+  s.agenda = {
+    frequency: FREQS.includes(g.frequency) ? g.frequency : d.agenda.frequency,
+    weekday: ((Math.round(num(g.weekday)) % 7) + 7) % 7, // 0 = domingo (7 também vira domingo)
+    dayOfMonth: Math.max(1, Math.min(28, Math.round(num(g.dayOfMonth)) || 5)),
+    customNote: String(g.customNote ?? '').slice(0, 120),
+    lastAporteDate: isISODate(g.lastAporteDate) ? g.lastAporteDate : null,
+  };
+  const fxm = isObj(s.settings) && isObj(s.settings.fxManual) ? s.settings.fxManual : {};
+  s.settings = { fxManual: { USD: num(fxm.USD) > 0 ? num(fxm.USD) : null, EUR: num(fxm.EUR) > 0 ? num(fxm.EUR) : null } };
+  const objs = (list) => (Array.isArray(list) ? list : []).filter(isObj);
+  const str = (v, n) => String(v ?? '').slice(0, n);
+  const optNum = (v) => (v == null ? undefined : num(v));
+  s.aportes = objs(s.aportes).slice(-10000).map((a) => prune({
+    ...a, id: str(a.id || uid(), 64), date: isISODate(a.date) ? a.date : null,
+    disponivel: num(a.disponivel), investido: num(a.investido), direto: num(a.direto), sobra: num(a.sobra),
+    caixa: optNum(a.caixa), caixaPlano: optNum(a.caixaPlano),
+    patrimonioAntes: optNum(a.patrimonioAntes), patrimonioDepois: optNum(a.patrimonioDepois),
+    observacao: str(a.observacao, 300),
+    compras: objs(a.compras).slice(0, 20000).map((x) => ({
+      classId: str(x.classId, 64), ticker: str(x.ticker, 40), qty: num(x.qty), price: num(x.price), valor: num(x.valor),
+      valorBRL: x.valorBRL == null ? num(x.valor) : num(x.valorBRL), currency: CURRENCIES.includes(x.currency) ? x.currency : 'BRL',
+      modo: ['lote', 'fracao', 'valor'].includes(x.modo) ? x.modo : 'lote',
+    })),
+    deltas: Array.isArray(a.deltas) ? objs(a.deltas).slice(0, 20000).map((x) => ({
+      classId: str(x.classId, 64), assetId: x.assetId == null ? null : str(x.assetId, 64),
+      field: x.field === 'qty' ? 'qty' : 'currentValue', amount: num(x.amount), label: str(x.label, 60),
+    })) : undefined,
+    prevLastAporteDate: isISODate(a.prevLastAporteDate) ? a.prevLastAporteDate : null,
+  }));
+  s.dividendos = objs(s.dividendos).slice(-50000).map((x) => ({
+    ...x, id: str(x.id || uid(), 64), date: isISODate(x.date) ? x.date : null, ticker: str(x.ticker, 40), tipo: str(x.tipo, 30), valor: num(x.valor),
+  }));
+  s.timeline = objs(s.timeline).slice(-50000).map((x) => prune({
+    ...x, id: str(x.id || uid(), 64), date: isISODate(x.date) ? x.date : null,
+    aporteId: x.aporteId == null ? undefined : str(x.aporteId, 64), dividendoId: x.dividendoId == null ? undefined : str(x.dividendoId, 64),
+    type: ['aporte', 'dividendo', 'alerta', 'marco'].includes(x.type) ? x.type : 'marco', title: str(x.title, 200), detail: str(x.detail, 600),
+  }));
+  // o "desfazer" agora tira só o que o aporte somou (engine.revertAporte); a cópia inteira antiga sai
+  delete s.undo;
+  const prevNotes = (Array.isArray(s.migrationNotes) ? s.migrationNotes : []).filter((x) => typeof x === 'string').map((x) => x.slice(0, 400));
+  s.migrationNotes = [...prevNotes, ...notes].slice(-10);
+  if (!s.migrationNotes.length) delete s.migrationNotes;
   if (oldVersion !== STATE_VERSION) s.migratedFrom = oldVersion || 3;
   s.version = STATE_VERSION;
   return s;
@@ -254,6 +347,7 @@ export function trackedTickers(state) {
 /**
  * Converte texto digitado em número. Aceita:
  *  "1.234,56" (BR) · "1234,56" · "1,234.56" (US) · "1234.56" · "1.500" (milhar BR) · "R$ 10,50"
+ *  "1.000.50" (o último grupo com 1–2 dígitos é a parte decimal) · "1e5" (notação científica)
  */
 export function parseNum(input) {
   if (typeof input === 'number') return Number.isFinite(input) ? input : 0;
@@ -262,28 +356,33 @@ export function parseNum(input) {
   if (!s) return 0;
   const compact = s.replace(/R\$|US\$|€|\s/g, '');
   const negative = compact.startsWith('-') || /^\(.*\)$/.test(compact);
+  const sci = compact.replace(/^[-+(]+|\)$/g, '');
+  if (/^(\d+\.?\d*|\.\d+)[eE][+-]?\d+$/.test(sci)) { const n = Number(sci); return Number.isFinite(n) ? (negative ? -n : n) : 0; }
   s = s.replace(/[^\d.,]/g, '');
   if (!s || !/\d/.test(s)) return 0;
   const lastDot = s.lastIndexOf('.');
   const lastComma = s.lastIndexOf(',');
   let intPart = s, decPart = '';
+  const groups = (parts) => { // vários separadores iguais: milhar, exceto se o último grupo não tem 3 dígitos
+    const last = parts[parts.length - 1];
+    if (last.length === 3) { intPart = parts.join(''); decPart = ''; } else { intPart = parts.slice(0, -1).join(''); decPart = last; }
+  };
   if (lastDot >= 0 && lastComma >= 0) {
     const dec = Math.max(lastDot, lastComma);
     intPart = s.slice(0, dec).replace(/[.,]/g, '');
     decPart = s.slice(dec + 1).replace(/[.,]/g, '');
   } else if (lastComma >= 0) {
     const parts = s.split(',');
-    if (parts.length > 2) { // "1,234,567" → milhar no padrão americano
-      intPart = parts.join('');
-    } else {
-      intPart = parts[0];
-      decPart = parts[1];
-    }
+    if (parts.length > 2) groups(parts); // "1,234,567" (milhar US) · "1,234,56"
+    else { intPart = parts[0]; decPart = parts[1]; }
   } else if (lastDot >= 0) {
     const parts = s.split('.');
-    const isThousands = parts.length > 2 || (parts[1].length === 3 && parts[0].length >= 1 && parts[0] !== '0' && !/^0/.test(parts[0]));
-    if (isThousands) intPart = parts.join('');
-    else { intPart = parts[0]; decPart = parts[1]; }
+    if (parts.length > 2) groups(parts); // "1.234.567" · "1.000.50"
+    else {
+      const isThousands = parts[1].length === 3 && parts[0].length >= 1 && !/^0/.test(parts[0]);
+      if (isThousands) intPart = parts.join('');
+      else { intPart = parts[0]; decPart = parts[1]; }
+    }
   }
   const n = parseFloat((intPart || '0') + (decPart ? '.' + decPart : ''));
   if (!Number.isFinite(n)) return 0;
@@ -296,6 +395,9 @@ export function toCents(v) {
   return Math.round(n * 100 + (n >= 0 ? 1e-7 : -1e-7));
 }
 
+const FREQS = ['diario', 'semanal', 'quinzenal', 'mensal', 'personalizado'];
+export function isISODate(v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v + 'T00:00:00Z')); }
+
 export function todayISO(d = new Date()) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
@@ -306,11 +408,11 @@ function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); retu
 export function nextAporteDate(agenda, today = new Date()) {
   if (!agenda || agenda.frequency === 'personalizado') return null;
   const t0 = new Date(today); t0.setHours(0, 0, 0, 0);
-  const ref = agenda.lastAporteDate ? new Date(agenda.lastAporteDate + 'T00:00:00') : null;
+  const ref = isISODate(agenda.lastAporteDate) ? new Date(agenda.lastAporteDate + 'T00:00:00') : null;
   let next;
   if (agenda.frequency === 'diario') next = ref ? addDays(ref, 1) : t0;
   else if (agenda.frequency === 'semanal' || agenda.frequency === 'quinzenal') {
-    const wd = Number(agenda.weekday) || 0;
+    const wd = ((Math.round(num(agenda.weekday)) % 7) + 7) % 7;
     // semanal: a partir do dia seguinte ao último aporte; quinzenal: a partir de 14 dias depois
     next = ref ? addDays(ref, agenda.frequency === 'quinzenal' ? 14 : 1) : new Date(t0);
     let g = 0; while (next.getDay() !== wd && g < 8) { next = addDays(next, 1); g++; }

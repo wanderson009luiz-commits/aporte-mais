@@ -26,12 +26,13 @@ export function randomPortfolio(r, i) {
     const ideals = splitHundred(r, nA);
     const assets = ideals.map((ip, j) => {
       const hasPrice = r() < 0.9;
-      const price = type === 'cripto' ? 1000 + r() * 400000 : type === 'exterior' ? 5 + r() * 600 : 1 + r() * 300;
+      // exterior às vezes abaixo de US$ 1 com 4 casas (centavos de dólar): testa custo exato ao centavo
+      const price = type === 'cripto' ? 1000 + r() * 400000 : type === 'exterior' ? (r() < 0.25 ? 0.01 + r() * 0.98 : 5 + r() * 600) : 1 + r() * 300;
       const qtyMode = r() < 0.5;
       return {
         id: `a${i}_${k}_${j}`, ticker: `T${k}${j}${type === 'b3' ? '3' : ''}`, idealPct: ip,
         qty: qtyMode ? (type === 'cripto' || type === 'exterior' ? r() * 3 : Math.floor(r() * 200)) : 0,
-        price: hasPrice ? Math.round(price * 100) / 100 : 0, priceMode: 'manual',
+        price: hasPrice ? (price < 1 ? Math.round(price * 10000) / 10000 : Math.round(price * 100) / 100) : 0, priceMode: 'manual',
         currentValue: qtyMode ? 0 : Math.round(r() * 20000 * 100) / 100,
         minQty: type === 'b3' && r() < 0.15 ? 100 : 1,
         minAmount: (type === 'rendafixa' || type === 'cripto') && r() < 0.3 ? Math.round(r() * 100) : 0,

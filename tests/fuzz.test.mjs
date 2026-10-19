@@ -1,8 +1,8 @@
 // Teste de estresse: milhares de carteiras aleatórias. Em TODAS, as regras abaixo precisam valer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planAporte, applyPlan } from '../js/engine.js';
-import { portfolioTotalBRL, quoteKey, classType } from '../js/model.js';
+import { planAporte, applyPlan, revertAporte } from '../js/engine.js';
+import { portfolioTotalBRL, quoteKey, classType, migrateState, toCents } from '../js/model.js';
 
 import { rng, randomPortfolio } from './gen.mjs';
 
@@ -35,14 +35,26 @@ test('estresse: 4000 carteiras aleatórias — a conta sempre fecha e nenhuma re
         assert.ok(it.value >= 0 && Number.isInteger(it.value), ctx);
         if (it.status === 'na_meta' || it.status === 'sem_preco' || it.status === 'abaixo_minimo') assert.equal(it.value, 0, ctx + ' ' + it.status);
         if (it.mode === 'lote') {
-          // 4) cotas inteiras, em múltiplos do lote, ao preço exato
+          // 4) cotas inteiras, em múltiplos do lote, custo = quantidade × preço arredondado ao centavo
           assert.ok(Number.isInteger(it.qty) && it.qty % it.minQty === 0, ctx);
-          assert.equal(it.value, (it.qty / it.minQty) * it.lotCost, ctx);
+          assert.equal(it.value, toCents(it.qty * it.price), ctx);
           // 5) nunca passa do alvo do ativo em mais de 1 lote
-          if (it.value > 0) assert.ok(it.value <= it.deficit + it.lotCost + 1, ctx + ` ${it.value} > ${it.deficit}+${it.lotCost}`);
+          if (it.value > 0) assert.ok(it.value <= it.deficit + it.lotCost + 2, ctx + ` ${it.value} > ${it.deficit}+${it.lotCost}`);
+          // 5b) não fica dinheiro parado se um lote de quem está abaixo do alvo ainda cabe
+          if (it.status === 'ok' || it.status === 'lote_caro') {
+            const left = c.budgetNative - c.items.reduce((s2, x) => s2 + x.value, 0);
+            const inc = toCents((it.qty + it.minQty) * it.price) - it.value;
+            const remaining = it.target - it.v - it.value;
+            assert.ok(!(remaining >= 1 && inc <= left), ctx + ` lote de ${it.a.ticker} (${inc}) cabia na sobra ${left}`);
+          }
         } else if (it.value > 0) {
           assert.ok(it.value <= Math.ceil(it.deficit) + 1, ctx);
           if (it.minAmount > 0) assert.ok(it.value >= it.minAmount, ctx + ' mínimo');
+        }
+        // 5c) quem ficou abaixo do mínimo não poderia ser comprado com a sobra final
+        if (it.status === 'abaixo_minimo') {
+          const left = c.budgetNative - c.items.reduce((s2, x) => s2 + x.value, 0);
+          assert.ok(Math.min(left, Math.round(it.deficit)) < it.minAmount, ctx + ` ${it.a.ticker} cabia na sobra ${left}`);
         }
       });
     });
@@ -60,6 +72,12 @@ test('estresse: 4000 carteiras aleatórias — a conta sempre fecha e nenhuma re
     const directUsd = plan.classes.filter((c) => c.directBRL > 0 && c.currency !== 'BRL').length;
     const tol = 0.011 * (1 + fracItems) + 0.06 * (usdItems + directUsd);
     assert.ok(Math.abs(after - before - aporte) <= tol + 1e-9, `${ctx}: depois-antes=${after - before}, tolerância ${tol}`);
+    // 9) a carteira registrada é estável (salvar e carregar não muda nada)
+    assert.deepStrictEqual(migrateState(s2), s2, ctx + ' migração estável');
+    // 10) desfazer volta exatamente ao patrimônio anterior
+    const back = revertAporte(s2, s2.aportes[s2.aportes.length - 1].id).state;
+    assert.ok(Math.abs(portfolioTotalBRL(back, {}, fx) - before) < 1e-6, ctx + ' desfazer');
+    assert.equal(back.aportes.length, s.aportes.length, ctx);
   }
   assert.ok(planned > 2500, 'a maioria das carteiras deveria ser calculável: ' + planned);
 });

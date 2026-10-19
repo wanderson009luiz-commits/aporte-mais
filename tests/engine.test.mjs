@@ -118,7 +118,10 @@ test('sem cotação nenhuma: avisa ativo por ativo e manda o dinheiro da classe 
   const plan = planAporte(s, 1000, { quotes: {} });
   assert.ok(plan.ok);
   const semPreco = plan.warnings.filter((w) => w.code === 'sem_preco');
-  assert.equal(semPreco.length, 17 + 4 + 15 + 2);
+  // um aviso por classe, listando todos os ativos sem preço daquela classe
+  assert.equal(semPreco.length, 4);
+  assert.equal(semPreco.reduce((n, w) => n + w.tickers.length, 0), 17 + 4 + 15 + 2);
+  assert.ok(semPreco.every((w) => w.tickers.every((t) => w.msg.includes(t))));
   // só renda fixa (por valor) e caixa recebem
   assert.equal(plan.investedBRL, 10000);
   assert.equal(plan.toCash + plan.cashDirect, 90000);

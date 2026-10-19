@@ -44,7 +44,7 @@ async function newPage(query, viewport = { width: 1366, height: 900 }) {
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`[${query}] pageerror: ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.g|ERR_|net::|falha simulada|non-2xx/i.test(m.text())) errors.push(`[${query}] console: ${m.text()}`); });
+  page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.g|ERR_|net::|falha simulada|non-2xx|formato inesperado/i.test(m.text())) errors.push(`[${query}] console: ${m.text()}`); });
   await page.goto(`${base}?${query}`);
   return page;
 }
@@ -257,6 +257,63 @@ console.log('\n8) Celular: todas as telas sem rolagem lateral');
     check(ow <= 0, `${tab}: sem rolagem lateral (${ow}px)`);
     await page.screenshot({ path: `${shots}/m-${tab}.png`, fullPage: true });
   }
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 9
+console.log('\n9) Falha ao salvar: aviso visível e nada perdido');
+{
+  const page = await newPage('scenario=zerada&run=9&fail=state_update');
+  await page.waitForSelector('#app-root:not([style*="none"])');
+  await page.waitForTimeout(800);
+  await page.click('.nav-btn[data-tab="agenda"]');
+  await page.click('.freq-btn[data-freq="mensal"]');
+  await page.waitForSelector('#save-banner:not([hidden])', { timeout: 5000 });
+  check(/ainda não foram salvas/.test(await txt(page, '#save-banner')), 'mostra "suas últimas alterações ainda não foram salvas"');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 10
+console.log('\n10) Backup adulterado não executa nada');
+{
+  const page = await newPage('scenario=zerada&run=10');
+  await page.waitForSelector('#app-root:not([style*="none"])');
+  await page.waitForTimeout(800);
+  const evil = { app: 'aporte-mais', state: {
+    classes: [
+      { id: 'c1', name: '<img src=x onerror="window.__xss=1">Ações', type: 'b3', idealPct: 95, assets: [{ id: 'a1', ticker: 'VALE3', idealPct: 100, qty: 3, termometro: { nota: '"><img src=y onerror="window.__xss=2">', motivos: ['<b>x</b>'] } }] },
+      { id: 'cx', name: 'Caixa', type: 'valor', isCash: true, idealPct: 5, currentValue: 100, assets: [] }],
+    agenda: { frequency: 'mensal', dayOfMonth: '"><img src=z onerror="window.__xss=3">' },
+    aportes: [{ id: 'q', date: '2026-10-01">x', disponivel: 100 }, { id: 'r', date: '2026-10-02', disponivel: 50, observacao: '<script>window.__xss=4</script>' }],
+  } };
+  const file = path.join(site, 'evil.json');
+  fs.writeFileSync(file, JSON.stringify(evil));
+  await page.click('.nav-btn[data-tab="config"]');
+  const chooser = page.waitForEvent('filechooser');
+  await page.click('#btn-import-backup');
+  await (await chooser).setFiles(file);
+  await page.waitForSelector('.modal-back.show');
+  await page.click('.modal .btn-primary');
+  await page.waitForTimeout(800);
+  for (const tab of ['painel', 'ativos', 'agenda', 'timeline', 'config', 'aporte']) { await page.click(`.nav-btn[data-tab="${tab}"]`); await page.waitForTimeout(200); }
+  await page.click('.nav-btn[data-tab="painel"]');
+  const seg = page.locator('.comp-seg').first();
+  if (await seg.count()) { await seg.hover(); await page.waitForTimeout(200); }
+  const res = await page.evaluate(() => ({ xss: window.__xss, imgs: [...document.querySelectorAll('img')].map((i) => i.getAttribute('src')) }));
+  check(res.xss === undefined && res.imgs.length === 0, `nenhum código do backup executou (xss=${res.xss}, imgs=${res.imgs.join(',')})`);
+  await page.click('.nav-btn[data-tab="config"]');
+  check(/<img src=x/.test(await page.locator('#class-list [data-f="name"]').first().inputValue()), 'o nome aparece como texto, não como HTML');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 11
+console.log('\n11) Carteira corrompida no banco: nada é gravado por cima');
+{
+  const page = await newPage('scenario=corrupt&run=11');
+  await page.waitForSelector('#boot-screen #btn-raw', { timeout: 5000 });
+  check(/formato inesperado/.test(await txt(page, '#boot-screen')), 'mostra aviso de formato inesperado com "Baixar dados brutos"');
+  const st = await page.evaluate(() => window.__fakeDb().portfolio_state[0].state);
+  check(st.classes === 'quebrado' && st.extra === 1, 'o documento original continua intacto');
   await page.close();
 }
 

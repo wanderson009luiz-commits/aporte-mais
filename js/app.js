@@ -82,7 +82,7 @@ function ago(iso) {
   if (h < 48) return `há ${h} h`;
   return `há ${Math.round(h / 24)} dias`;
 }
-function fmtDateBR(iso) { if (!iso) return '—'; const [y, m, d] = String(iso).slice(0, 10).split('-'); return `${d}/${m}/${y}`; }
+function fmtDateBR(iso) { if (!iso) return '—'; const [y, m, d] = String(iso).slice(0, 10).split('-'); return esc(`${d}/${m}/${y}`); }
 
 // ---------------------------------------------------------------------
 // Avisos e diálogos
@@ -233,6 +233,9 @@ async function ensurePortfolio(userId) {
 async function loadState() {
   const { data, error } = await sb.from('portfolio_state').select('state, updated_at').eq('portfolio_id', portfolioId).maybeSingle();
   if (error) throw error; // NUNCA cai para a carteira padrão se a leitura falhar
+  if (data && data.state != null && (typeof data.state !== 'object' || !Array.isArray(data.state.classes))) {
+    const e = new Error('formato inesperado da carteira'); e.raw = data.state; throw e; // não migra nem grava por cima
+  }
   if (data && data.state) {
     const before = Number(data.state.version) || 0;
     state = migrateState(data.state);
@@ -266,10 +269,19 @@ async function bootFor(u) {
   } catch (e) {
     console.error(e);
     stateLoaded = false;
-    showBoot('Não foi possível abrir a carteira', 'Verifique sua conexão. Seus dados estão seguros — nada foi alterado.', {
-      spinner: false, actions: '<button class="btn btn-primary" id="btn-retry-boot">Tentar de novo</button> <button class="btn" id="btn-boot-logout">Sair</button>' });
+    const raw = e && e.raw !== undefined ? e.raw : undefined;
+    showBoot('Não foi possível abrir a carteira', raw !== undefined
+      ? 'Os dados salvos estão num formato inesperado. Nada foi alterado. Baixe os dados brutos e me envie para recuperar.'
+      : 'Verifique sua conexão. Seus dados estão seguros — nada foi alterado.', {
+      spinner: false, actions: '<button class="btn btn-primary" id="btn-retry-boot">Tentar de novo</button> ' + (raw !== undefined ? '<button class="btn" id="btn-raw">Baixar dados brutos</button> ' : '') + '<button class="btn" id="btn-boot-logout">Sair</button>' });
     $('btn-retry-boot').onclick = () => { booted = false; setTimeout(() => onAuthed(u), 0); };
-    $('btn-boot-logout').onclick = () => sb.auth.signOut();
+    $('btn-boot-logout').onclick = () => sb.auth.signOut({ scope: 'local' });
+    if (raw !== undefined) $('btn-raw').onclick = () => {
+      const blob = new Blob([JSON.stringify(raw, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob); const a = document.createElement('a');
+      a.href = url; a.download = `aporte-mais-dados-brutos-${todayISO()}.json`; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
     return;
   }
   booted = true;
@@ -295,48 +307,95 @@ function resetSession() {
 // ---------------------------------------------------------------------
 // Salvamento (com proteção contra edição em dois aparelhos)
 // ---------------------------------------------------------------------
-let saveTimer = null, saving = false, saveQueued = false, dirty = false;
+let saveTimer = null, saving = false, saveQueued = false, dirty = false, editGen = 0, saveFailing = false, reloadingForConflict = false;
 function scheduleSave() {
-  if (!stateLoaded || conflict) return;
+  if (!stateLoaded) return;
   if (state?.undo) state.undo.after = (Number(state.undo.after) || 0) + 1; // mudanças feitas depois do ponto de desfazer
-  dirty = true;
+  dirty = true; editGen++;
+  if (conflict) { renderSaveBanner(); return; }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 700);
 }
+/** Grava a carteira. Gravação condicional: o banco só aceita se ninguém salvou depois que esta tela leu. */
 async function saveNow() {
-  if (!stateLoaded || conflict) return;
-  if (saving) { saveQueued = true; return; }
+  if (!stateLoaded || conflict) return false;
+  if (saving) { saveQueued = true; return false; }
   saving = true;
+  const gen = editGen;
+  let ok = false;
   try {
-    const { data: cur, error: e1 } = await sb.from('portfolio_state').select('updated_at').eq('portfolio_id', portfolioId).maybeSingle();
-    if (e1) throw e1;
-    if (cur && lastUpdatedAt && Date.parse(cur.updated_at) !== Date.parse(lastUpdatedAt)) { await handleConflict(cur.updated_at); return; }
     const nowIso = new Date().toISOString();
-    const { data, error } = await sb.from('portfolio_state').upsert({ portfolio_id: portfolioId, state, updated_at: nowIso }).select('updated_at').single();
+    const { data, error } = await sb.from('portfolio_state').update({ state, updated_at: nowIso })
+      .eq('portfolio_id', portfolioId).eq('updated_at', lastUpdatedAt).select('updated_at');
     if (error) throw error;
-    lastUpdatedAt = data.updated_at;
-    dirty = false;
+    if (data && data.length) { lastUpdatedAt = data[0].updated_at; ok = true; }
+    else {
+      const { data: cur, error: e2 } = await sb.from('portfolio_state').select('updated_at').eq('portfolio_id', portfolioId).maybeSingle();
+      if (e2) throw e2;
+      if (!cur) { // a linha não existe mais: recria com a carteira desta tela
+        const { data: ins, error: e3 } = await sb.from('portfolio_state').insert({ portfolio_id: portfolioId, state, updated_at: nowIso }).select('updated_at').single();
+        if (e3) throw e3;
+        lastUpdatedAt = ins.updated_at; ok = true;
+      } else if (Date.parse(cur.updated_at) === Date.parse(lastUpdatedAt)) {
+        // mesma versão (só o formato do horário diferiu): pode gravar
+        const { data: up, error: e4 } = await sb.from('portfolio_state').update({ state, updated_at: nowIso }).eq('portfolio_id', portfolioId).select('updated_at');
+        if (e4) throw e4;
+        if (!up || !up.length) throw new Error('gravação não confirmada');
+        lastUpdatedAt = up[0].updated_at; ok = true;
+      } else {
+        saving = false;
+        await handleConflict(cur.updated_at);
+        return false;
+      }
+    }
+    if (editGen === gen) dirty = false;
+    if (saveFailing) { saveFailing = false; renderSaveBanner(); }
     syncTrackedTickers();
   } catch (e) {
     console.error('Falha ao salvar', e);
-    toast('Não consegui salvar agora — vou tentar de novo em instantes.');
+    saveFailing = true; renderSaveBanner();
     clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 5000);
   } finally {
     saving = false;
-    if (saveQueued) { saveQueued = false; saveNow(); }
+    if (saveQueued && !conflict) { saveQueued = false; saveNow(); }
   }
+  return ok;
+}
+function renderSaveBanner() {
+  const b = $('save-banner'); if (!b) return;
+  if (conflict) {
+    b.className = 'save-banner err';
+    b.innerHTML = '<span>Sua carteira foi alterada em outro aparelho. <b>As alterações desta tela não estão sendo salvas.</b></span><span class="sb-actions"><button class="btn btn-sm" id="sb-backup">Baixar backup desta tela</button><button class="btn btn-sm" id="sb-mine">Substituir a do outro aparelho</button><button class="btn btn-sm btn-primary" id="sb-reload">Recarregar</button></span>';
+    b.hidden = false;
+    $('sb-backup').onclick = () => exportBackup();
+    $('sb-reload').onclick = () => { reloadingForConflict = true; location.reload(); };
+    $('sb-mine').onclick = () => replaceRemote();
+  } else if (saveFailing) {
+    b.className = 'save-banner warn';
+    b.innerHTML = '<span>Sem conexão com a nuvem — <b>suas últimas alterações ainda não foram salvas</b>. Tentando de novo…</span>';
+    b.hidden = false;
+  } else { b.hidden = true; b.innerHTML = ''; }
+}
+let remoteUpdatedAtSeen = null;
+async function replaceRemote() {
+  const ok = await confirmBox('Substituir a versão do outro aparelho?', 'A carteira salva no outro aparelho será trocada pela que está nesta tela. O que foi feito lá depois que você abriu esta tela será perdido.', 'Substituir');
+  if (!ok) return;
+  conflict = false; lastUpdatedAt = remoteUpdatedAtSeen; renderSaveBanner();
+  saveNow();
 }
 async function handleConflict(remoteUpdatedAt) {
-  conflict = true;
+  conflict = true; remoteUpdatedAtSeen = remoteUpdatedAt;
+  renderSaveBanner();
   const choice = await dialog({
     title: 'Carteira alterada em outro lugar',
-    html: '<p>Sua carteira foi salva em outro aparelho ou aba depois que você abriu esta tela. Para não perder nada, recarregue para ver a versão mais recente.</p>',
-    buttons: [{ label: 'Manter a desta tela', value: 'mine' }, { label: 'Recarregar (recomendado)', kind: 'primary', value: 'reload' }],
+    html: '<p>Sua carteira foi salva em outro aparelho ou aba depois que você abriu esta tela. Para não perder nada, recarregue para ver a versão mais recente. Se fez alterações aqui que quer guardar, baixe um backup antes.</p>',
+    buttons: [{ label: 'Decidir depois', value: null }, { label: 'Baixar backup desta tela', value: 'backup' }, { label: 'Recarregar (recomendado)', kind: 'primary', value: 'reload' }],
   });
-  if (choice === 'mine') { conflict = false; lastUpdatedAt = remoteUpdatedAt; saveNow(); }
-  else location.reload();
+  if (choice === 'backup') exportBackup();
+  if (choice === 'reload') { reloadingForConflict = true; location.reload(); }
+  // fechar/decidir depois: o aviso fica visível no topo, com as mesmas opções
 }
-window.addEventListener('beforeunload', (e) => { if (dirty || saving) { saveNow(); e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', (e) => { if (!reloadingForConflict && (dirty || saving)) { if (!conflict) saveNow(); e.preventDefault(); e.returnValue = ''; } });
 
 async function syncTrackedTickers() {
   if (!stateLoaded) return;
@@ -542,7 +601,7 @@ function lineChartSVG(points, opts) {
   let g = '';
   for (let k = 0; k <= 4; k++) { const v = (maxV * k) / 4, y = yAt(v); g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="${k === 0 ? 'var(--axis)' : 'var(--grid)'}" stroke-width="1"/><text x="${L - 8}" y="${y + 3.5}" text-anchor="end">${compact(v)}</text>`; }
   const labelIdx = n <= 1 ? [0] : n === 2 ? [0, 1] : [0, Math.floor((n - 1) / 2), n - 1];
-  labelIdx.forEach((i) => { g += `<text x="${xAt(i)}" y="${H - 8}" text-anchor="${n > 1 && i === 0 ? 'start' : n > 1 && i === n - 1 ? 'end' : 'middle'}">${points[i].x}</text>`; });
+  labelIdx.forEach((i) => { g += `<text x="${xAt(i)}" y="${H - 8}" text-anchor="${n > 1 && i === 0 ? 'start' : n > 1 && i === n - 1 ? 'end' : 'middle'}">${esc(points[i].x)}</text>`; });
   opts.series.forEach((s, si) => {
     const pts = points.map((p, i) => (p.ys[si] == null ? null : [xAt(i), yAt(p.ys[si])])).filter(Boolean);
     if (!pts.length) return;
@@ -555,7 +614,7 @@ function lineChartSVG(points, opts) {
   points.forEach((p, i) => {
     const tipHtml = `<div class="t">${esc(p.full || p.x)}</div>` + opts.series.map((s, si) => (p.ys[si] == null ? '' : `<div><span class="swatch" style="display:inline-block;background:${s.color};margin-right:6px;"></span>${esc(s.name)}: <span class="num">R$ ${n2(p.ys[si])}</span></div>`)).join('');
     const top = Math.min(...p.ys.filter((v) => v != null).map(yAt));
-    g += `<g class="hov"><line x1="${xAt(i)}" x2="${xAt(i)}" y1="${T}" y2="${T + ih}" stroke="var(--border-strong)" stroke-width="1" opacity="0"/><rect x="${xAt(i) - band / 2}" y="${T}" width="${band}" height="${ih}" fill="transparent" data-tip='${tipHtml.replace(/'/g, '&#39;')}' data-tx="${xAt(i)}" data-ty="${top}"/></g>`;
+    g += `<g class="hov"><line x1="${xAt(i)}" x2="${xAt(i)}" y1="${T}" y2="${T + ih}" stroke="var(--border-strong)" stroke-width="1" opacity="0"/><rect x="${xAt(i) - band / 2}" y="${T}" width="${band}" height="${ih}" fill="transparent" data-tip="${esc(tipHtml)}" data-tx="${xAt(i)}" data-ty="${top}"/></g>`;
   });
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.aria)}">${g}</svg>`;
 }
@@ -571,7 +630,7 @@ function barChartSVG(bars, color, aria) {
     const cx = L + slot * i + slot / 2, x = cx - bw / 2;
     if (b.v > 0) { const h = Math.max(2, (b.v / maxV) * ih), y = T + ih - h, r = Math.min(4, h / 2, bw / 2); g += `<path d="M${x},${T + ih} V${y + r} Q${x},${y} ${x + r},${y} H${x + bw - r} Q${x + bw},${y} ${x + bw},${y + r} V${T + ih} Z" fill="${color}"/>`; }
     if (W >= 600 || i % 2 === (bars.length - 1) % 2) g += `<text x="${cx}" y="${H - 8}" text-anchor="middle">${b.label}</text>`;
-    g += `<rect x="${L + slot * i}" y="${T}" width="${slot}" height="${ih}" fill="transparent" data-tip='<div class="t">${b.full}</div><span class="num">R$ ${n2(b.v)}</span>' data-tx="${cx}" data-ty="${yAt(b.v)}"/>`;
+    g += `<rect x="${L + slot * i}" y="${T}" width="${slot}" height="${ih}" fill="transparent" data-tip="${esc(`<div class="t">${esc(b.full)}</div><span class="num">R$ ${n2(b.v)}</span>`)}" data-tx="${cx}" data-ty="${yAt(b.v)}"/>`;
   });
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}">${g}</svg>`;
 }
@@ -580,7 +639,7 @@ function renderPainel() {
   const c = $('painel-container');
   const fx = fxCtx();
   const total = portfolioTotalBRL(state, quotes, fx);
-  const aportes = [...state.aportes].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const aportes = state.aportes.filter((a) => a.date).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   const totalAportado = aportes.reduce((s, a) => s + (Number(a.disponivel) || 0), 0);
   const proventos = state.dividendos.reduce((s, d) => s + (Number(d.valor) || 0), 0);
   const rows = state.classes.map((cl, idx) => { const v = classValueBRL(cl, quotes, fx) || 0; return { cl, idx, v, cur: total > 0 ? (v / total) * 100 : 0, ideal: Number(cl.idealPct) || 0 }; });
@@ -598,7 +657,7 @@ function renderPainel() {
   if (total <= 0) {
     distHtml = '<div class="panel-empty">Sua carteira ainda está zerada. Informe quantas cotas você tem em <b>Ativos</b> (os preços vêm sozinhos) — ou faça seu primeiro aporte.<br><button class="btn btn-sm" data-goto="ativos">Ir para Ativos</button> <button class="btn btn-sm" data-goto="aporte">Fazer um aporte</button></div>';
   } else {
-    const segs = rows.filter((r) => r.v > 0).map((r) => `<div class="comp-seg" style="flex:${r.v} 1 0; background:${classColor(r.idx)};" data-tip='<div class="t">${esc(r.cl.name).replace(/'/g, '&#39;')}</div><span class="num">${pct1(r.cur)}%</span> · R$ ${n2(r.v)}'></div>`).join('');
+    const segs = rows.filter((r) => r.v > 0).map((r) => `<div class="comp-seg" style="flex:${r.v} 1 0; background:${classColor(r.idx)};" data-tip="${esc(`<div class="t">${esc(r.cl.name)}</div><span class="num">${pct1(r.cur)}%</span> · R$ ${n2(r.v)}`)}"></div>`).join('');
     const list = rows.map((r) => {
       const gap = (r.ideal / 100) * total - r.v;
       const gapTxt = Math.abs(gap) < total * 0.005 ? '<span class="lbl">no alvo</span><span style="color:var(--teal)">✓</span>'
@@ -880,12 +939,12 @@ function renderAtivos() {
     }
     const s = sentimentCache[normTicker(a.ticker)];
     card.innerHTML = `<div class="asset-card-main">${fields}
-        <button class="term-toggle" data-action="toggle-term"><span class="term-dot" style="background:${tl.color}"></span>${a.termometro.nota === null ? 'Termômetro' : a.termometro.nota + '/100'}</button>${s ? `<span class="mini-sentiment ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span>` : ''}
+        <button class="term-toggle" data-action="toggle-term"><span class="term-dot" style="background:${tl.color}"></span>${a.termometro.nota === null ? 'Termômetro' : esc(a.termometro.nota) + '/100'}</button>${s ? `<span class="mini-sentiment ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span>` : ''}
         <div class="asset-card-actions"><button class="icon-btn" data-action="remove" title="Remover ativo" aria-label="Remover ${esc(a.ticker)}">✕</button></div>
         <div class="asset-hint-row">${quoteHint(cls, a)}</div>
       </div>
       <div class="term-panel" data-term-panel>
-        <div class="term-panel-row"><div class="field small"><label>Nota (0-100)</label><input class="plain-input" style="width:80px;" inputmode="numeric" value="${a.termometro.nota === null ? '' : a.termometro.nota}" data-f="nota" placeholder="—"></div><div style="font-size:12px; color:${tl.color}; font-weight:600;">${tl.label}</div></div>
+        <div class="term-panel-row"><div class="field small"><label>Nota (0-100)</label><input class="plain-input" style="width:80px;" inputmode="numeric" value="${a.termometro.nota === null ? '' : esc(a.termometro.nota)}" data-f="nota" placeholder="—"></div><div style="font-size:12px; color:${tl.color}; font-weight:600;">${tl.label}</div></div>
         <div data-motivos></div>
         <button class="btn btn-sm btn-ghost" data-action="add-motivo">+ Adicionar motivo</button>
         <div class="sentiment-box" style="margin-top:16px;"><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); margin-bottom:8px;">Leitura automática de notícias</div>${renderSentimentBox(a.ticker)}</div>
@@ -939,7 +998,8 @@ function renderAtivos() {
 function renderSentimentBox(ticker) {
   const s = sentimentCache[normTicker(ticker)];
   if (!s) return '<div class="sentiment-empty">Leitura automática de notícias ainda não ativada para este ativo.</div>';
-  const sources = (s.sources || []).slice(0, 2).map((src) => { const u = String(src.url || ''); return /^https?:\/\//i.test(u) ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(src.title || 'fonte')}</a>` : esc(src.title || ''); }).join(' · ');
+  const srcList = Array.isArray(s.sources) ? s.sources.filter((x) => x && typeof x === 'object') : [];
+  const sources = srcList.slice(0, 2).map((src) => { const u = String(src.url || ''); return /^https?:\/\//i.test(u) ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(src.title || 'fonte')}</a>` : esc(src.title || ''); }).join(' · ');
   return `<div class="sentiment-head"><span class="sentiment-badge ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span><span class="num" style="font-size:12px; color:var(--text-faint);">${Number(s.score) || 0}/100</span></div><div class="sentiment-summary">${esc(s.summary || '')}</div><div class="sentiment-meta">${s.session === 'abertura' ? 'Abertura' : 'Fechamento'} · ${fmtDateBR(s.session_date)}${sources ? ' · ' + sources : ''}</div>`;
 }
 let quoteT = null;
@@ -1044,7 +1104,7 @@ function renderAgenda() {
     d.innerHTML = `<div class="field"><label for="agenda-weekday" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Dia da semana</label><select class="name-input" id="agenda-weekday" style="width:160px;">${WEEKDAYS.map((w, i) => `<option value="${i}" ${Number(ag.weekday) === i ? 'selected' : ''}>${w}</option>`).join('')}</select></div>`;
     $('agenda-weekday').addEventListener('change', (e) => { ag.weekday = Number(e.target.value); scheduleSave(); renderAgenda(); });
   } else if (ag.frequency === 'mensal') {
-    d.innerHTML = `<div class="field"><label for="agenda-day" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Dia do mês (1 a 28)</label><input class="plain-input" style="width:80px; text-align:left;" id="agenda-day" inputmode="numeric" value="${ag.dayOfMonth || 5}"></div>`;
+    d.innerHTML = `<div class="field"><label for="agenda-day" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Dia do mês (1 a 28)</label><input class="plain-input" style="width:80px; text-align:left;" id="agenda-day" inputmode="numeric" value="${esc(ag.dayOfMonth || 5)}"></div>`;
     $('agenda-day').addEventListener('change', (e) => { ag.dayOfMonth = Math.max(1, Math.min(28, Math.round(parseNum(e.target.value)) || 5)); scheduleSave(); renderAgenda(); });
   } else if (ag.frequency === 'personalizado') {
     d.innerHTML = `<div class="field" style="min-width:260px;"><label for="agenda-note" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Sua rotina (nota livre)</label><input class="name-input" id="agenda-note" maxlength="120" value="${esc(ag.customNote || '')}" placeholder="ex: aporto quando sobra dinheiro no fim do mês"></div>`;
@@ -1093,12 +1153,13 @@ function addDividendo(e) {
 // ---------------------------------------------------------------------
 // Backup
 // ---------------------------------------------------------------------
-function exportBackup() {
-  const payload = { app: 'aporte-mais', version: state.version, appVersion: APP_VERSION, exportedAt: new Date().toISOString(), state: { ...state, undo: undefined } };
+function exportBackup(st = state, name = 'aporte-mais-backup') {
+  if (!st) return;
+  const payload = { app: 'aporte-mais', version: st.version, appVersion: APP_VERSION, exportedAt: new Date().toISOString(), state: { ...st, undo: undefined } };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = `aporte-mais-backup-${todayISO()}.json`;
+  a.href = url; a.download = `${name}-${todayISO()}.json`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast('Backup exportado.');
@@ -1130,7 +1191,18 @@ function wire() {
   $('btn-auth-toggle').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'signup' : 'login'));
   $('btn-auth-forgot').addEventListener('click', () => setAuthMode('forgot'));
   document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-  $('btn-logout').addEventListener('click', async () => { if (dirty) await saveNow(); await sb.auth.signOut(); });
+  $('btn-logout').addEventListener('click', async () => {
+    clearTimeout(saveTimer);
+    if (dirty && !conflict) await saveNow();
+    for (let i = 0; i < 60 && saving; i++) await new Promise((r) => setTimeout(r, 100));
+    if (dirty) {
+      const choice = await dialog({ title: 'Sair sem salvar?', html: '<p>Algumas alterações ainda não chegaram à nuvem. Baixe um backup para não perdê-las.</p>',
+        buttons: [{ label: 'Cancelar', value: null }, { label: 'Baixar backup e sair', value: 'backup' }, { label: 'Sair mesmo assim', kind: 'primary', value: 'exit' }] });
+      if (!choice) return;
+      if (choice === 'backup') exportBackup();
+    }
+    await sb.auth.signOut({ scope: 'local' });
+  });
   $('quote-chip').addEventListener('click', () => refreshQuotes({ silent: false }));
   $('aporte-form').addEventListener('submit', (e) => { e.preventDefault(); calcular(); });
   $('btn-refresh-prices').addEventListener('click', () => refreshQuotes({ silent: false }));
@@ -1159,6 +1231,7 @@ function wire() {
 // Início
 // ---------------------------------------------------------------------
 (async function init() {
+  if (window.top !== window.self) { document.body.textContent = 'Abra o Aporte+ diretamente no endereço do app.'; return; }
   wire();
   if (!window.supabase || !window.supabase.createClient) {
     showBoot('Não foi possível carregar o app', 'Recarregue a página. Se continuar, verifique sua conexão.', { spinner: false, actions: '<button class="btn btn-primary" id="btn-reload">Recarregar</button>' });
@@ -1170,7 +1243,13 @@ function wire() {
   if (TABS.includes(h)) activeTab = h;
   sb.auth.onAuthStateChange((event, session) => {
     if (event === 'PASSWORD_RECOVERY') { setTimeout(() => askNewPassword('Criar nova senha'), 300); }
-    if (event === 'SIGNED_OUT') { resetSession(); showAuth('login'); }
+    if (event === 'SIGNED_OUT') {
+      const unsaved = dirty && state ? state : null;
+      resetSession(); dirty = false; saveFailing = false; renderSaveBanner();
+      showAuth('login');
+      if (unsaved) dialog({ title: 'Sessão encerrada', html: '<p>Você saiu da conta antes de algumas alterações chegarem à nuvem. Baixe um backup delas para importar depois.</p>',
+        buttons: [{ label: 'Fechar', value: null }, { label: 'Baixar backup', kind: 'primary', value: 'b' }] }).then((v) => { if (v) exportBackup(unsaved, 'aporte-mais-nao-salvo'); });
+    }
     if (event === 'SIGNED_IN' && session?.user && !booted) setTimeout(() => onAuthed(session.user), 0);
   });
   try {
