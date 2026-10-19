@@ -25,6 +25,8 @@ jobs:
           node-version: 22
       - name: Testes do motor de cálculo (inclui 4.000 carteiras aleatórias)
         run: npm test
+      - name: Testes das funções do servidor (cotações e termômetro, sem rede)
+        run: npm run test:functions
       - name: Instalar navegador de teste
         run: |
           npm install --no-save playwright@1.63.0

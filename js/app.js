@@ -15,6 +15,7 @@ const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsZGl5bHl5bmtncHJwZnh5eWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxNjA4NTYsImV4cCI6MjEwNDczNjg1Nn0.mlv8I8EOtRhiZyw2PlVnp2mNMXLZCTJr0acDLMKKjy0';
 const QUOTE_MAX_AGE_MS = 20 * 60 * 1000; // ao abrir o app, atualiza se a cotação tiver mais de 20 min
 const QUOTE_REFRESH_EVERY_MS = 15 * 60 * 1000;
+const QUOTE_STALE_MS = 7 * 24 * 3600 * 1000; // cotação sem atualizar há 7 dias não vale como preço atual (feriados longos têm até 5 dias)
 
 // ---------------------------------------------------------------------
 // Estado
@@ -521,7 +522,9 @@ function applyQuoteRows(rows) {
   (rows || []).forEach((r) => {
     if (!r || typeof r.ticker !== 'string') return;
     const price = Number(r.price);
-    quotes[r.ticker] = { price: Number.isFinite(price) ? price : 0, currency: String(r.currency || 'BRL').toUpperCase(), change_percent: r.change_percent == null ? null : Number(r.change_percent), updated_at: r.updated_at };
+    const t = Date.parse(r.updated_at);
+    quotes[r.ticker] = { price: Number.isFinite(price) ? price : 0, currency: String(r.currency || 'BRL').toUpperCase(), change_percent: r.change_percent == null ? null : Number(r.change_percent),
+      updated_at: r.updated_at, stale: !Number.isFinite(t) || Date.now() - t > QUOTE_STALE_MS };
   });
 }
 function applyFxRows(rows) {
@@ -894,6 +897,7 @@ function renderReady() {
       if (quoteSource(c) !== 'none' && !isQuotableTicker(t)) invalid.push(t);
     });
   });
+  if (r.stale.length) items.push({ k: 'warn', t: `<b>${r.stale.length}</b> ${r.stale.length === 1 ? 'ativo está' : 'ativos estão'} sem cotação recente e ${r.stale.length === 1 ? 'vai' : 'vão'} usar o último preço conhecido: ${r.stale.map(esc).join(', ')}. Confira esses preços na corretora.` });
   if (dupes.length) items.push({ k: 'warn', t: `Ticker repetido na mesma classe: <b>${dupes.map(esc).join(', ')}</b> — junte em uma linha só. <button class="link-btn act" data-goto="ativos">Ver em Ativos</button>` });
   if (invalid.length) items.push({ k: 'warn', t: `Ticker inválido (use só letras e números, sem espaços): <b>${invalid.map(esc).join(', ')}</b>. <button class="link-btn act" data-goto="ativos">Corrigir</button>` });
   if (r.needPrice > 0) {
@@ -1108,6 +1112,7 @@ function quoteHint(c, a) {
   if (!isQuotableTicker(t)) return `<span class="bad-txt">"${esc(t)}" não é um ticker válido — use só letras e números, sem espaços (ex.: PETR4).</span>`;
   if (c.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === t)) return `<span class="bad-txt">${esc(t)} aparece duas vezes nesta classe — junte as quantidades em uma linha só e remova a outra.</span>`;
   const qFailed = q && q.currency === 'ERR';
+  if (q && q.stale && !qFailed && p.source !== 'manual') return `<span class="bad-txt">A última cotação de ${esc(t)} é de ${ago(q.updated_at).replace('há ', '')} atrás — a fonte parou de atualizar. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ' <span class="warn-txt">Usando o último preço conhecido.</span>' : ''}`;
   if (q && !qFailed && q.currency !== classCurrency(c)) return `<span class="bad-txt">A cotação de ${esc(t)} veio em ${esc(q.currency)}, diferente da classe (${classCurrency(c)}). Confira o tipo da classe.</span>`;
   const qTxt = q && !qFailed ? `Cotação ${priceTxt(q.price, q.currency)} · ${ago(q.updated_at)}${q.change_percent != null ? ` · ${q.change_percent >= 0 ? '+' : ''}${pct(q.change_percent)}% no dia` : ''}` : '';
   if (p.source === 'manual') return `Usando o preço digitado.${qTxt ? ` ${qTxt} · <button class="link-btn" data-action="auto-price">usar automático</button>` : ''}`;

@@ -120,7 +120,8 @@ export function assetPrice(cls, a, quotes) {
   const src = quoteSource(cls);
   const q = quotes && src !== 'none' ? quotes[quoteKey(src, a.ticker)] : null;
   const qPrice = q ? cleanPrice(cls, q.price) : 0;
-  const qOk = !!q && qPrice > 0 && (q.currency || 'BRL') === classCurrency(cls);
+  // cotação marcada como velha (a fonte parou de atualizar há dias) não vale como preço atual
+  const qOk = !!q && !q.stale && qPrice > 0 && (q.currency || 'BRL') === classCurrency(cls);
   const manual = cleanPrice(cls, a.price);
   const cached = cleanPrice(cls, a.lastQuotePrice);
   if (a.priceMode === 'manual' && manual > 0) return { price: manual, source: 'manual', quote: qOk ? q : null };

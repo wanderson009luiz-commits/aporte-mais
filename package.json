@@ -1,11 +1,13 @@
 {
   "name": "aporte-mais",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "private": true,
   "type": "module",
   "description": "Aporte+ — organize seus aportes por classe e ativo, com ordem de compra calculada.",
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:functions": "npx --yes deno@2.5.4 run -A --config tests/functions/deno.json tests/functions/price.test.ts && npx --yes deno@2.5.4 run -A --config tests/functions/deno.json tests/functions/termometro.test.ts",
+    "test:e2e": "node tests/e2e/run.mjs e2e-prints"
   },
   "engines": { "node": ">=20" }
 }

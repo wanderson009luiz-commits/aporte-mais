@@ -1,0 +1,4 @@
+{
+  "nodeModulesDir": "none",
+  "imports": { "npm:@supabase/supabase-js@2.117.2": "./fake-supabase.ts" }
+}

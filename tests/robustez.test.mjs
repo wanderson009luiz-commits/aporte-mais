@@ -408,3 +408,13 @@ test('preço: modo manual sem preço digitado segue a regra do automático (cota
   assert.deepEqual([assetPrice(c, a, {}).price, assetPrice(c, a, {}).source], [59.9, 'cache']);
   assert.equal(assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL' } }).price, 61);
 });
+
+test('cotação marcada como velha (fonte parou de atualizar) não vale como preço atual', () => {
+  const s = demo();
+  const c = s.classes[0]; const a = c.assets[1];
+  a.priceMode = 'auto'; a.lastQuotePrice = 0;
+  assert.equal(assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL', stale: true } }).price, 0);
+  a.lastQuotePrice = 59.9;
+  assert.deepEqual([assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL', stale: true } }).price, assetPrice(c, a, { VALE3: { price: 61, currency: 'BRL', stale: true } }).source], [59.9, 'cache']);
+  assert.equal(assetPrice(c, a, { VALE3: { price: 0, currency: 'ERR' } }).source, 'cache', 'linha de ticker desconhecido nunca vira preço');
+});
