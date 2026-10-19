@@ -52,7 +52,6 @@ export function currentSlot(d = new Date()): { session_date: string; session: "a
 
 /** Uma execução por janela: a linha "#TERM" em ticker_quotes guarda o horário da última. */
 async function claimSlot(supabase: any, start: Date): Promise<boolean> {
-  const startIso = start.toISOString();
   const nowIso = new Date().toISOString();
   const { data, error } = await supabase.from("ticker_quotes").update({ updated_at: nowIso })
     .eq("ticker", "#TERM").lt("updated_at", new Date(start.getTime() - 2 * 60e3).toISOString()).select("ticker");
@@ -62,7 +61,7 @@ async function claimSlot(supabase: any, start: Date): Promise<boolean> {
     .upsert([{ ticker: "#TERM", price: 0, currency: "SYS", change_percent: null, updated_at: nowIso }], { onConflict: "ticker", ignoreDuplicates: true })
     .select("ticker");
   if (e2) { console.error("term claim insert", e2); return false; }
-  return !!(ins && ins.length) && startIso <= nowIso;
+  return !!(ins && ins.length); // só ganha a vez quem criou a linha
 }
 
 async function analyzeBatch(tickers: string[]): Promise<Record<string, any>> {

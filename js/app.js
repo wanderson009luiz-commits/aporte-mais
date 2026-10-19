@@ -453,8 +453,7 @@ async function flushSave() {
   for (let i = 0; i < 150 && saving; i++) await new Promise((r) => setTimeout(r, 100));
   if (!dirty) return true;
   if (conflict) return false;
-  const ok = await saveNow();
-  return ok && !dirty;
+  return await saveNow(); // true = a gravação que levou esta alteração foi confirmada
 }
 /** Avisa o resultado de uma gravação importante (registrar/desfazer aporte). */
 function reportSave(ok, what) {
