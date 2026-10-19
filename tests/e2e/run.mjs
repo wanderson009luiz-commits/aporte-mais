@@ -613,6 +613,71 @@ console.log('\n23) Fonte parada ou ticker que sumiu: o patrimônio usa o último
   await page.close();
 }
 
+// ---------------------------------------------------------------- 24
+console.log('\n24) Troca de ticker com conversão: BCFF11 → BTHF11 (0,8), MALL11 → PMLL11, troca manual');
+{
+  const page = await newPage('scenario=trocas&run=24');
+  await page.waitForSelector('#app-root:not([style*="none"])');
+  await page.waitForFunction(() => document.querySelector('#quote-chip-txt')?.textContent === 'agora', null, { timeout: 8000 });
+  await page.waitForTimeout(300);
+  const painel = (await txt(page, '#painel-container')).replace(/\s+/g, ' ');
+  check(/Precisa da sua atenção/.test(painel) && /Trocar para BTHF11 \(13 → 10 cotas\)/.test(painel) && /Trocar para PMLL11/.test(painel), 'Painel abre mostrando as trocas pendentes');
+  await page.click('.nav-btn[data-tab="aporte"]');
+  await page.waitForTimeout(200);
+  const ready = (await txt(page, '#ready-card')).replace(/\s+/g, ' ');
+  check(/BCFF11 foi incorporado pelo BTHF11/.test(ready) && /Trocar para BTHF11 \(13 → 10 cotas\)/.test(ready), 'checklist oferece BCFF11 → BTHF11 já com a conta (13 → 10 cotas)');
+  check(/Trocar para PMLL11 \(mesmas 5 cotas\)/.test(ready), 'checklist oferece MALL11 → PMLL11 com as mesmas 5 cotas');
+  check(!/Nenhuma quantidade informada/.test(ready), 'carteira com cotas não mostra o aviso de carteira zerada');
+  await page.click('#ready-card [data-swap-a]:has-text("BTHF11")');
+  await page.waitForSelector('#modal-back.show');
+  const m = (await txt(page, '#modal')).replace(/\s+/g, ' ');
+  check(/Suas 13 cotas viram 10 cotas de BTHF11/.test(m) && /13 × 0,8 = 10,4/.test(m) && /sobra de 0,4 cota/.test(m), 'confirmação explica 13 × 0,8 = 10,4 e a sobra de 0,4 cota (leilão)');
+  await page.screenshot({ path: `${shots}/24-troca-bcff11.png` });
+  await page.click('#modal .btn-primary');
+  await page.waitForTimeout(1800);
+  const fiis = async () => page.evaluate(() => window.__fakeDb().portfolio_state[0].state.classes.find((c) => c.id === 'fiis').assets);
+  const b = (await fiis()).find((a) => a.ticker === 'BTHF11');
+  check(!!b && b.qty === 10 && b.qtyEpoch === 1 && b.swaps?.[0]?.from === 'BCFF11' && !(b.price > 0), 'salvo: BTHF11 com 10 cotas, época 1, histórico da troca e sem o preço antigo');
+  await page.click('#ready-card [data-swap-a]:has-text("PMLL11")');
+  await page.waitForTimeout(1800);
+  const pm = (await fiis()).find((a) => a.ticker === 'PMLL11');
+  check(!!pm && pm.qty === 5 && !pm.qtyEpoch, 'MALL11 → PMLL11 direto, mesmas 5 cotas, sem mexer na época');
+  const ready2 = await txt(page, '#ready-card');
+  check(!/BCFF11/.test(ready2) && !/MALL11/.test(ready2), 'depois das trocas o checklist não fala mais de BCFF11/MALL11');
+  await page.click('.nav-btn[data-tab="painel"]'); await page.waitForTimeout(200);
+  check(!/Precisa da sua atenção/.test(await txt(page, '#painel-container')), 'Painel sem pendências depois das trocas');
+  // troca manual de um ticker que a fonte não reconhece
+  await page.click('.nav-btn[data-tab="ativos"]');
+  await page.click('.class-tab:has-text("FIIs")');
+  await page.waitForTimeout(300);
+  const hintB = await page.locator('.asset-card').filter({ has: page.locator('[data-f="ticker"][value="BTHF11"]') }).innerText();
+  check(/Cotação R\$ 8,94/.test(hintB) && /antes BCFF11/.test(hintB), 'Ativos mostra a cotação do BTHF11 e "antes BCFF11"');
+  await page.click('[data-action="swap-manual"]');
+  await page.waitForSelector('#modal-back.show');
+  await page.fill('#swap-to', 'deva11');
+  await page.fill('#swap-factor', '0,5');
+  await page.click('#modal .btn-primary');
+  await page.waitForFunction(() => /viram/.test(document.querySelector('#modal')?.textContent || ''), null, { timeout: 3000 });
+  const m2 = (await txt(page, '#modal')).replace(/\s+/g, ' ');
+  check(/Suas 20 cotas viram 10 cotas de DEVA11/.test(m2), 'troca manual: 20 × 0,5 = 10 cotas de DEVA11');
+  await page.click('#modal .btn-primary');
+  await page.waitForTimeout(2000);
+  const dv = (await fiis()).find((a) => a.ticker === 'DEVA11');
+  check(!!dv && dv.qty === 10 && dv.qtyEpoch === 1, 'troca manual salva: DEVA12 → DEVA11 com 10 cotas');
+  const hintD = await page.locator('.asset-card').filter({ has: page.locator('[data-f="ticker"][value="DEVA11"]') }).innerText();
+  check(/Cotação R\$ 17,90/.test(hintD), 'cotação do ticker novo aparece depois da troca manual');
+  await page.screenshot({ path: `${shots}/24b-troca-manual.png`, fullPage: true });
+  await page.close();
+}
+{
+  const page = await newPage('scenario=zerada&run=25');
+  await page.waitForSelector('#app-root:not([style*="none"])');
+  await page.waitForTimeout(800);
+  await page.click('.nav-btn[data-tab="aporte"]'); await page.waitForTimeout(200);
+  check(/Nenhuma quantidade informada/.test(await txt(page, '#ready-card')), 'carteira sem nenhuma cota avisa que a sugestão considera a carteira vazia');
+  await page.close();
+}
+
 console.log(`\n${passes} ok, ${failures} falha(s)`);
 if (errors.length) { console.log('\nErros de JavaScript na página:'); errors.forEach((e) => console.log('  ' + e)); }
 await browser.close();

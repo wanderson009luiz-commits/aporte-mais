@@ -505,3 +505,9 @@ input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 2px rgba(21
 .aporte-row .v{white-space:nowrap;}
 .toast:not(.show){pointer-events:none !important;}
 .save-banner{position:sticky; top:8px; z-index:40;}
+
+/* cartão de pendências no Painel (troca de ticker, alertas) */
+.attention-card{border-color:rgba(217,122,88,0.38);}
+.attn-row{display:flex; align-items:center; justify-content:space-between; gap:10px 14px; flex-wrap:wrap; padding:10px 0; border-top:1px solid var(--border);}
+.attention-card .card-title + .attn-row{border-top:none; padding-top:6px;}
+.attn-txt{flex:1 1 260px; font-size:13.5px; line-height:1.5; color:var(--text);}

@@ -26,10 +26,34 @@ export const CURRENCIES = ['BRL', 'USD', 'EUR'];
  * Códigos que mudaram na B3 (incorporação ou troca de código), conferidos em outubro/2026.
  * O app avisa e oferece a troca — nunca troca sozinho.
  */
+/**
+ * Tickers que deixaram de existir (incorporação, troca de gestão/código).
+ * factor = quantas cotas novas para cada cota antiga.
+ */
 export const TICKER_CHANGES = {
-  BCFF11: { to: 'BTHF11', note: 'foi incorporado pelo BTHF11 (fusão aprovada pelos cotistas)' },
-  MALL11: { to: 'PMLL11', note: 'mudou de nome, gestão e código para PMLL11' },
+  BCFF11: { to: 'BTHF11', factor: 0.8, date: '2024-10-18',
+    note: 'foi incorporado pelo BTHF11: último pregão em 18/10/2024 e cada 10 cotas viraram 8 de BTHF11 (as frações foram vendidas em leilão e pagas em dinheiro)' },
+  MALL11: { to: 'PMLL11', factor: 1, date: '2025-07-22',
+    note: 'passou para a gestão da Pátria e virou PMLL11 em 22/07/2025, com a mesma quantidade de cotas' },
 };
+
+/**
+ * Quantidade depois de uma troca de ticker. Na bolsa (lote) só existem cotas inteiras: a fração
+ * vira dinheiro (a B3 junta as frações e vende em leilão). Conta em milionésimos para que
+ * 13 × 0,8 dê exatamente 10,4.
+ * @returns {{qty:number, fraction:number}}
+ */
+export function convertQty(qty, factor, mode) {
+  const q = Math.max(0, toNumber(qty));
+  const f = toNumber(factor);
+  if (!(f > 0) || q === 0) return { qty: q, fraction: 0 };
+  if (mode === 'lote') {
+    const exact = Math.round(q * f * 1e6) / 1e6;
+    const whole = Math.floor(exact + 1e-9);
+    return { qty: whole, fraction: Math.max(0, Math.round((exact - whole) * 1e6) / 1e6) };
+  }
+  return { qty: Math.round(q * f * 1e8) / 1e8, fraction: 0 };
+}
 
 export function uid() { return Math.random().toString(36).slice(2, 10).padEnd(8, '0'); }
 
@@ -259,6 +283,14 @@ export function migrateState(input) {
       a.minQty = Math.max(1, Math.round(num(a.minQty)) || 1);
       a.minAmount = Math.max(0, num(a.minAmount));
       a.lastQuotePrice = Math.max(0, num(a.lastQuotePrice));
+      // trocas de ticker com conversão de cotas: aportes anteriores não podem ser desfeitos em cotas
+      const epoch = Math.min(1e6, Math.round(num(a.qtyEpoch)));
+      if (epoch > 0) a.qtyEpoch = epoch; else delete a.qtyEpoch;
+      const swaps = (Array.isArray(a.swaps) ? a.swaps : []).filter(isObj).slice(-10).map((x) => ({
+        from: String(x.from ?? '').slice(0, 40), to: String(x.to ?? '').slice(0, 40),
+        factor: num(x.factor) > 0 ? num(x.factor) : 1, date: isISODate(x.date) ? x.date : null,
+      }));
+      if (swaps.length) a.swaps = swaps; else delete a.swaps;
       // Versões antigas nunca tiveram cotação automática funcionando: os preços digitados lá
       // viram apenas reserva; o preço automático (mais atual) passa a valer quando existir.
       if (a.priceMode !== 'manual' && a.priceMode !== 'auto') a.priceMode = 'auto';
@@ -309,6 +341,7 @@ export function migrateState(input) {
       classId: str(x.classId, 64), assetId: x.assetId == null ? null : str(x.assetId, 64),
       field: x.field === 'qty' ? 'qty' : 'currentValue', amount: num(x.amount), label: str(x.label, 60),
       value: x.value == null ? undefined : num(x.value), currency: CURRENCIES.includes(x.currency) ? x.currency : undefined,
+      epoch: num(x.epoch) > 0 ? Math.min(1e6, Math.round(num(x.epoch))) : undefined,
     })) : undefined,
     prevLastAporteDate: isISODate(a.prevLastAporteDate) ? a.prevLastAporteDate : null,
   }));

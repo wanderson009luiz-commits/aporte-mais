@@ -448,7 +448,8 @@ export function applyPlan(state, plan, market = {}, opts = {}) {
         const qtyMode = isAutoValued(c, a, quotes) || (num(a.qty) <= 0 && toCents(a.currentValue) === 0);
         if (qtyMode) {
           a.qty = num(a.qty) + it.qty; // soma exata: nunca arredonda o que a pessoa já tinha
-          deltas.push({ classId: c.id, assetId: a.id, field: 'qty', amount: it.qty, value: it.value / 100, currency: r.currency, label: normTicker(a.ticker) });
+          deltas.push({ classId: c.id, assetId: a.id, field: 'qty', amount: it.qty, value: it.value / 100, currency: r.currency, label: normTicker(a.ticker),
+            ...(num(a.qtyEpoch) > 0 ? { epoch: num(a.qtyEpoch) } : {}) });
           if (it.priceSource === 'auto' && it.price > 0) a.lastQuotePrice = it.price; // garante valor mesmo se a cotação sumir
           if (!(num(a.price) > 0) && it.price > 0 && it.priceSource !== 'auto') a.price = it.price;
         } else addValue(c, a, it.value, normTicker(a.ticker));
@@ -528,6 +529,12 @@ export function revertAporte(state, aporteId, market = {}) {
     const label = d.label || d.assetId || d.classId;
     if (!c || (d.assetId && !asset)) { missing.push(label); return; }
     const cur = classCurrency(c);
+    // cotas compradas antes de uma troca de ticker com conversão (ex.: 10 BCFF11 → 8 BTHF11):
+    // tirar a mesma quantidade agora seria errado — a pessoa confere à mão
+    if (d.field === 'qty' && asset && (num(asset.qtyEpoch) || 0) !== (num(d.epoch) || 0)) {
+      manual.push({ label, amount: d.value == null ? 0 : num(d.value), currency: d.currency || cur, qty: num(d.amount), swapped: true });
+      return;
+    }
     const qtyBased = !!asset && buyMode(c) !== 'valor' && num(asset.qty) > 0; // valor vem de cotas × preço
     if (d.field === 'qty' && qtyBased) {
       const q = num(asset.qty) - num(d.amount);

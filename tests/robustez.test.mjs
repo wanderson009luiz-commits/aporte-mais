@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { planAporte, applyPlan, revertAporte, fillLots, apportion, stateSignature, MIN_ORDER_CENTS } from '../js/engine.js';
 import {
   migrateState, defaultState, parseNum, toCents, toNumber, portfolioTotalBRL, assetPrice, cleanPrice, buyMode,
-  nextAporteDate, todayISO, classValueNative,
+  nextAporteDate, todayISO, classValueNative, convertQty, TICKER_CHANGES,
 } from '../js/model.js';
 import { rng } from './gen.mjs';
 
@@ -476,4 +476,67 @@ test('desfazer vários aportes do mesmo dia volta a data da agenda para antes de
   const p1 = planAporte(t, 100, {}); const r1 = applyPlan(t, p1, {}, APPLY); t = r1.state;
   t = revertAporte(t, r1.record.id, {}).state;
   assert.equal(t.agenda.lastAporteDate, '2026-10-01', 'aporte único: volta a data anterior');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Troca de ticker (incorporação/mudança de código) com conversão de cotas
+// ---------------------------------------------------------------------------------------------
+test('troca de ticker: BCFF11 → BTHF11 converte 10 cotas em 8; fração vira dinheiro', () => {
+  assert.deepEqual(TICKER_CHANGES.BCFF11.to, 'BTHF11');
+  assert.equal(TICKER_CHANGES.BCFF11.factor, 0.8);
+  assert.equal(TICKER_CHANGES.MALL11.to, 'PMLL11');
+  assert.equal(TICKER_CHANGES.MALL11.factor, 1);
+  assert.deepEqual(convertQty(10, 0.8, 'lote'), { qty: 8, fraction: 0 });
+  assert.deepEqual(convertQty(13, 0.8, 'lote'), { qty: 10, fraction: 0.4 });
+  assert.deepEqual(convertQty(7, 0.8, 'lote'), { qty: 5, fraction: 0.6 });
+  assert.deepEqual(convertQty(15, 0.8, 'lote'), { qty: 12, fraction: 0 });
+  assert.deepEqual(convertQty(1, 0.8, 'lote'), { qty: 0, fraction: 0.8 });
+  assert.deepEqual(convertQty(3, 1 / 3, 'lote'), { qty: 1, fraction: 0 }, '3 × 1/3 é 1 cota, não 0,999…');
+  assert.deepEqual(convertQty(250, 1, 'lote'), { qty: 250, fraction: 0 });
+  assert.deepEqual(convertQty(0.5, 2, 'fracao'), { qty: 1, fraction: 0 });
+  for (let q = 0; q <= 2000; q++) { // nunca cria cota do nada nem perde mais que uma
+    const r = convertQty(q, 0.8, 'lote');
+    assert.ok(Number.isInteger(r.qty) && r.qty <= q * 0.8 + 1e-9 && q * 0.8 - r.qty < 1 - 1e-12, `q=${q}`);
+    assert.ok(Math.abs(r.qty + r.fraction - q * 0.8) < 1e-6, `q=${q}: soma volta ao total`);
+  }
+});
+
+test('troca de ticker: migração guarda a época das cotas e o histórico da troca; aporte antigo vai para conferência', () => {
+  const s = st([{ id: 'f', name: 'FIIs', type: 'b3', idealPct: 90, assets: [{ id: 'b', ticker: 'BCFF11', idealPct: 100, qty: 13, price: 8, priceMode: 'manual' }] }, CASH(10)]);
+  const p = planAporte(s, 1000, {});
+  assert.ok(p.ok);
+  const { state: s2, record } = applyPlan(s, p, {}, APPLY);
+  const bought = s2.classes[0].assets[0].qty - 13;
+  assert.ok(bought > 0);
+  assert.equal(record.deltas.find((d) => d.field === 'qty').epoch, undefined, 'sem troca, aporte não carrega época');
+  // a pessoa troca para BTHF11 (o app converte as cotas e sobe a época)
+  const s3 = JSON.parse(JSON.stringify(s2));
+  const a = s3.classes[0].assets[0];
+  const conv = convertQty(a.qty, 0.8, 'lote');
+  Object.assign(a, { ticker: 'BTHF11', qty: conv.qty, qtyEpoch: 1, price: 0, priceMode: 'auto', lastQuotePrice: 0,
+    swaps: [{ from: 'BCFF11', to: 'BTHF11', factor: 0.8, date: '2024-10-18' }] });
+  const m = migrateState(s3).state || migrateState(s3);
+  const am = m.classes[0].assets[0];
+  assert.equal(am.qtyEpoch, 1);
+  assert.deepEqual(am.swaps, [{ from: 'BCFF11', to: 'BTHF11', factor: 0.8, date: '2024-10-18' }]);
+  const mm = migrateState(JSON.parse(JSON.stringify(m)));
+  assert.deepEqual(mm.state || mm, m, 'migrar de novo não muda nada');
+  // desfazer o aporte feito antes da troca: não tira cotas de BCFF11 de BTHF11 — pede conferência
+  const res = revertAporte(m, record.id, { quotes: { BTHF11: { price: 9, currency: 'BRL' } } });
+  assert.equal(res.state.classes[0].assets[0].qty, conv.qty, 'quantidade não mexida');
+  assert.equal(res.manual.length, 1);
+  assert.equal(res.manual[0].swapped, true);
+  assert.equal(res.manual[0].qty, bought);
+  // aporte feito DEPOIS da troca guarda a época e desfaz normalmente
+  m.classes[0].assets[0].price = 9; m.classes[0].assets[0].priceMode = 'manual';
+  const p2 = planAporte(m, 500, {});
+  const r2 = applyPlan(m, p2, {}, APPLY);
+  const d2 = r2.record.deltas.find((d) => d.field === 'qty');
+  assert.equal(d2.epoch, 1);
+  const back = revertAporte(r2.state, r2.record.id, {});
+  assert.deepEqual(back.manual, []);
+  assert.equal(back.state.classes[0].assets[0].qty, conv.qty);
+  // registro com época sobrevive à migração
+  const m2 = migrateState(JSON.parse(JSON.stringify(r2.state)));
+  assert.equal((m2.state || m2).aportes.at(-1).deltas.find((d) => d.field === 'qty').epoch, 1);
 });

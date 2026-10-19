@@ -5,7 +5,7 @@ import {
   CLASS_TYPES, CURRENCIES, classType, classCurrency, buyMode, hasAssets, quoteSource, quoteKey, normTicker,
   assetPrice, assetValue, isAutoValued, classValueNative, classValueBRL, portfolioTotalBRL, fxRate, sumIdeal, isHundred,
   defaultState, migrateState, trackedTickers, parseNum, toCents, todayISO, nextAporteDate, uid, isQuotableTicker, cleanPrice,
-  TICKER_CHANGES,
+  TICKER_CHANGES, convertQty, isISODate,
 } from './model.js?v=dev';
 import { planAporte, applyPlan, revertAporte, stateSignature, validateForPlan, alignmentScore } from './engine.js?v=dev';
 
@@ -838,6 +838,10 @@ function renderPainel() {
     <div class="kpi"><div class="k">Proventos recebidos</div><div class="v">${compact(proventos)}</div><div class="s">R$ ${n2(provAno)} em ${ano}</div></div>
     <div class="kpi"><div class="k">Alinhamento com o plano</div><div class="v" style="color:${alignColor}">${align === null ? '—' : pct1(align) + '%'}</div><div class="s">${align === null ? 'Cadastre suas quantidades para medir' : align >= 90 ? 'Carteira próxima do ideal' : align >= 75 ? 'Alguns ajustes pendentes' : 'Carteira longe do plano'}</div></div>
   </div>`;
+  const changes = tickerChangeAlerts();
+  if (changes.length) {
+    html += `<div class="card attention-card"><h3 class="card-title">Precisa da sua atenção</h3>${changes.map(({ c: cl, a, ch }) => `<div class="attn-row"><div class="attn-txt"><b>${esc(normTicker(a.ticker))}</b> ${esc(ch.note)}.</div><button class="btn btn-sm" data-swap-c="${esc(cl.id)}" data-swap-a="${esc(a.id)}">${esc(swapLabel(cl, a, ch.to, ch.factor))}</button></div>`).join('')}</div>`;
+  }
   let distHtml;
   if (total <= 0) {
     distHtml = '<div class="panel-empty">Sua carteira ainda está zerada. Informe quantas cotas você tem em <b>Ativos</b> (os preços vêm sozinhos) — ou faça seu primeiro aporte.<br><button class="btn btn-sm" data-goto="ativos">Ir para Ativos</button> <button class="btn btn-sm" data-goto="aporte">Fazer um aporte</button></div>';
@@ -893,6 +897,7 @@ function renderPainel() {
     </div></div>`;
   c.innerHTML = html;
   c.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.goto)));
+  bindSwapButtons(c);
   attachTips(c);
 }
 let resizeT = null;
@@ -920,6 +925,12 @@ function renderReady() {
   const items = [];
   const sumC = sumIdeal(state.classes);
   items.push(isHundred(sumC) ? { k: 'ok', t: `Classes somam <b>100%</b>.` } : { k: 'bad', t: `Classes somam <b>${pct(sumC)}%</b> — precisa ser 100%. <button class="link-btn act" data-goto="config">Ajustar</button>` });
+  // carteira zerada: a sugestão divide o aporte só pelos percentuais (certo para quem está começando)
+  const anyAsset = state.classes.some((c) => hasAssets(c) && c.assets.length > 0);
+  const empty = state.classes.every((c) => (hasAssets(c) ? c.assets.every((a) => !(Number(a.qty) > 0) && !(Number(a.currentValue) > 0)) : !(Number(c.currentValue) > 0)));
+  if (anyAsset && empty) items.push({ k: 'warn', t: 'Nenhuma quantidade informada: a carteira está zerada. Se você já tem investimentos, informe <b>quantas cotas tem de cada ativo</b> — sem isso a sugestão considera a carteira vazia e divide o aporte só pelos seus percentuais. <button class="link-btn act" data-goto="ativos">Informar em Ativos</button>' });
+  // tickers que mudaram de código (incorporação, troca de gestão): troca aqui mesmo, com a conversão
+  tickerChangeAlerts().forEach(({ c, a, ch }) => items.push({ k: 'bad', t: `<b>${esc(normTicker(a.ticker))}</b> ${esc(ch.note)}. <button class="link-btn act" data-swap-c="${esc(c.id)}" data-swap-a="${esc(a.id)}">${esc(swapLabel(c, a, ch.to, ch.factor))}</button>` }));
   const assetErrs = r.errors.filter((e) => e.code === 'soma_ativos' || e.code === 'classe_vazia');
   if (assetErrs.length) assetErrs.forEach((e) => items.push({ k: 'bad', t: esc(e.msg) + ' <button class="link-btn act" data-goto="ativos">Ajustar</button>' }));
   else items.push({ k: 'ok', t: 'Ativos de cada classe somam <b>100%</b>.' });
@@ -950,6 +961,30 @@ function renderReady() {
   $('ready-card').innerHTML = `<div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap;"><h3 class="card-title" style="margin:0;">Antes de calcular</h3>${quotesRefreshing ? '<span class="quote-chip busy"><span class="qdot"></span>Atualizando cotações…</span>' : ''}</div><div class="ready-list">${items.map((i) => `<div class="ready-item ${i.k}"><span class="ic">${i.k === 'ok' ? '✓' : i.k === 'warn' ? '!' : '×'}</span><div>${i.t}</div></div>`).join('')}</div>`;
   $('ready-card').querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.goto)));
   $('ready-card').querySelectorAll('[data-refresh]').forEach((b) => b.addEventListener('click', () => refreshQuotes({ silent: false })));
+  bindSwapButtons($('ready-card'));
+}
+/** Ativos cujo ticker mudou de código (lista conhecida) e que estão sem cotação atual. */
+function tickerChangeAlerts() {
+  const out = [];
+  state.classes.forEach((c) => {
+    if (!hasAssets(c) || buyMode(c) === 'valor') return;
+    c.assets.forEach((a) => {
+      const ch = TICKER_CHANGES[normTicker(a.ticker)];
+      if (!ch) return;
+      const q = quotes[quoteKey(quoteSource(c), a.ticker)];
+      if (q && !q.failed && !q.stale) return; // ainda com cotação atual: não insiste
+      out.push({ c, a, ch });
+    });
+  });
+  return out;
+}
+function bindSwapButtons(root) {
+  root.querySelectorAll('[data-swap-a]').forEach((b) => b.addEventListener('click', () => {
+    const c = state.classes.find((x) => x.id === b.dataset.swapC);
+    const a = c?.assets.find((x) => x.id === b.dataset.swapA);
+    const ch = a && TICKER_CHANGES[normTicker(a.ticker)];
+    if (ch) swapTicker(c.id, a.id, ch.to, ch.factor, ch.date);
+  }));
 }
 function renderAporteTab() { renderReady(); if (!invalidatePlanIfStale() && lastPlan) renderResultado(); }
 
@@ -1127,7 +1162,10 @@ async function undoAporte(aporteId) {
   const notes = [];
   if (res.missing.length) notes.push(`Não existem mais e ficaram como estão: ${res.missing.map(esc).join(', ')}.`);
   if (res.clamped.length) notes.push(`Já tinham menos do que o aporte somou e ficaram em zero: ${res.clamped.map(esc).join(', ')}. Confira em Ativos.`);
-  if (res.manual.length) notes.push(`Não deu para tirar sozinho (a classe mudou depois do aporte) — ajuste à mão em Ativos: ${res.manual.map((m) => `${esc(m.label)}: ${money(m.amount, m.currency)}`).join(' · ')}.`);
+  const swapped = res.manual.filter((m) => m.swapped);
+  const otherManual = res.manual.filter((m) => !m.swapped);
+  if (swapped.length) notes.push(`Cotas compradas antes de uma troca de ticker não foram tiradas (a quantidade mudou na conversão) — ajuste à mão em Ativos: ${swapped.map((m) => `${esc(m.label)}: ${qtyTxt(m.qty, Number.isInteger(m.qty) ? 'lote' : 'fracao')} ${m.qty === 1 ? 'cota' : 'cotas'} (${money(m.amount, m.currency)})`).join(' · ')}.`);
+  if (otherManual.length) notes.push(`Não deu para tirar sozinho (a classe mudou depois do aporte) — ajuste à mão em Ativos: ${otherManual.map((m) => `${esc(m.label)}: ${money(m.amount, m.currency)}`).join(' · ')}.`);
   const saved = await flushSave();
   if (reportSave(saved, 'Aporte desfeito')) {
     if (notes.length) dialog({ title: 'Aporte desfeito — confira', html: `<p>${notes.join('</p><p>')}</p>` });
@@ -1160,15 +1198,88 @@ function quoteHint(c, a) {
   if (q && !qFailed && q.currency !== classCurrency(c)) return `<span class="bad-txt">A cotação de ${esc(t)} veio em ${esc(q.currency)}, diferente da classe (${classCurrency(c)}). Confira o tipo da classe.</span>`;
   const qTxt = q && !qFailed ? `Cotação ${priceTxt(q.price, q.currency)} · ${ago(q.updated_at)}${q.change_percent != null ? ` · ${q.change_percent >= 0 ? '+' : ''}${pct(q.change_percent)}% no dia` : ''}` : '';
   if (p.source === 'manual') return `Usando o preço digitado.${qTxt ? ` ${qTxt} · <button class="link-btn" data-action="auto-price" data-key="${esc(a.id)}:auto-price">usar automático</button>` : ''}`;
-  if (p.source === 'auto') return qTxt;
+  const before = Array.isArray(a.swaps) && a.swaps.length ? ` · antes ${esc(a.swaps[a.swaps.length - 1].from)}` : '';
+  if (p.source === 'auto') return qTxt + before;
   const ch = TICKER_CHANGES[t];
-  if (ch && (!q || qFailed)) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-key="${esc(a.id)}:rename" data-to="${esc(ch.to)}">Trocar para ${esc(ch.to)}</button> <span>· se você tinha cotas, confira na corretora a quantidade convertida.</span>`;
+  if (ch && (!q || qFailed)) return `<span class="warn-txt">${esc(t)} ${esc(ch.note)}.</span> <button class="link-btn" data-action="rename" data-key="${esc(a.id)}:rename" data-to="${esc(ch.to)}" data-factor="${ch.factor}">${esc(swapLabel(c, a, ch.to, ch.factor))}</button>`;
   // preço digitado numa versão antiga: oferecido quando não há nenhum outro preço real
   const oldPrice = p.source === 'none' && a.priceMode === 'auto' && Number(a.price) > 0 ? cleanPrice(c, a.price) : 0;
   const useOld = oldPrice > 0 ? ` <button class="link-btn" data-action="use-old-price" data-key="${esc(a.id)}:use-old">usar o preço digitado antes (${priceTxt(oldPrice, classCurrency(c))})</button>` : '';
-  if (qFailed || failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ` <span class="warn-txt">Usando o último preço conhecido (${priceTxt(p.price, classCurrency(c))}).</span>` : ''}${useOld}`;
+  if (qFailed || failedQuoteKeys.has(key)) return `<span class="bad-txt">A fonte não reconhece ${esc(t)} — o ticker pode ter mudado ou deixado de ser negociado. Confira na corretora ou digite o preço.</span>${p.source === 'cache' ? ` <span class="warn-txt">Usando o último preço conhecido (${priceTxt(p.price, classCurrency(c))}).</span>` : ''}${useOld} <button class="link-btn" data-action="swap-manual" data-key="${esc(a.id)}:swap-manual">Mudou de código? Trocar ticker</button>`;
   if (p.source === 'cache') return `<span class="warn-txt">Sem cotação agora — usando o último preço conhecido (${priceTxt(p.price, classCurrency(c))}).</span>`;
   return (quotesRefreshing ? 'Buscando cotação…' : '<span class="warn-txt">Sem cotação ainda. Toque em "Atualizar cotações agora" ou digite o preço.</span>') + useOld;
+}
+
+/** Texto do botão de troca, já com a conta das cotas (ex.: "Trocar para BTHF11 (13 → 10 cotas)"). */
+function swapLabel(cls, a, to, factor) {
+  const q = Number(a.qty) || 0;
+  if (!(q > 0) || Number(factor) === 1) return `Trocar para ${to}${q > 0 ? ` (mesmas ${qtyTxt(q, buyMode(cls))} cotas)` : ''}`;
+  const conv = convertQty(q, factor, buyMode(cls));
+  return `Trocar para ${to} (${qtyTxt(q, buyMode(cls))} → ${qtyTxt(conv.qty, buyMode(cls))} ${conv.qty === 1 ? 'cota' : 'cotas'})`;
+}
+/**
+ * Troca o ticker de um ativo (incorporação, mudança de código), convertendo as cotas pela
+ * proporção. Os percentuais e o histórico continuam; o preço passa a vir da cotação do novo.
+ */
+async function swapTicker(classId, assetId, toRaw, factorRaw, date) {
+  const cls = state?.classes.find((c) => c.id === classId);
+  const a = cls?.assets.find((x) => x.id === assetId);
+  if (!cls || !a) return;
+  const to = normTicker(toRaw).replace(/\s+/g, '');
+  const factor = Number(factorRaw);
+  const from = normTicker(a.ticker);
+  if (!isQuotableTicker(to)) { toast('Ticker novo inválido — use só letras e números (ex.: BTHF11).'); return; }
+  if (to === from) { toast('O ticker novo é igual ao atual.'); return; }
+  if (!(factor > 0 && factor <= 1000)) { toast('Proporção inválida.'); return; }
+  if (cls.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === to)) {
+    toast(`${to} já está em ${cls.name}: some as cotas convertidas na linha de ${to} e remova ${from}.`); return;
+  }
+  const mode = buyMode(cls);
+  const had = Number(a.qty) || 0;
+  const conv = convertQty(had, factor, mode);
+  const fTxt = factor.toLocaleString('pt-BR', { maximumFractionDigits: 6 });
+  if (had > 0 && factor !== 1) {
+    const frac = conv.fraction > 0 ? `<p>A sobra de ${conv.fraction.toLocaleString('pt-BR', { maximumFractionDigits: 6 })} cota não vira cota: a B3 junta as frações, vende em leilão e paga em dinheiro na sua conta da corretora. Se quiser, registre esse valor em Histórico → Proventos.</p>` : '';
+    const ok = await dialog({ title: `Trocar ${from} por ${to}?`, buttons: [{ label: 'Cancelar', value: false }, { label: 'Trocar', kind: 'primary', value: true }], html:
+      `<p>Cada cota de ${esc(from)} vale <b>${fTxt}</b> de ${esc(to)}. Suas <b>${qtyTxt(had, mode)}</b> cotas viram <b>${qtyTxt(conv.qty, mode)}</b> ${conv.qty === 1 ? 'cota' : 'cotas'} de ${esc(to)} (${qtyTxt(had, mode)} × ${fTxt} = ${(Math.round(had * factor * 1e6) / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 6 })}).</p>${frac}<p style="color:var(--text-muted); font-size:13px;">Confira a quantidade na corretora ou na Área do Investidor da B3. Os percentuais e o histórico continuam iguais.</p>` });
+    if (!ok) return;
+  }
+  const backup = JSON.parse(JSON.stringify(a));
+  a.ticker = to; a.priceMode = 'auto'; a.price = 0; a.lastQuotePrice = 0;
+  if (had > 0 && factor !== 1) { a.qty = conv.qty; a.qtyEpoch = (Number(a.qtyEpoch) || 0) + 1; }
+  a.swaps = [...(Array.isArray(a.swaps) ? a.swaps : []), { from, to, factor, date: isISODate(date) ? date : todayISO() }].slice(-10);
+  scheduleSave(); renderAtivos(); renderTopbar(); if (activeTab === 'aporte') renderAporteTab(); if (activeTab === 'painel') renderPainel();
+  debounceQuoteRefresh();
+  offerSessionUndo(`${from} trocado por ${to}${had > 0 && factor !== 1 ? ` (${qtyTxt(conv.qty, mode)} ${conv.qty === 1 ? 'cota' : 'cotas'})` : ''}. Buscando a cotação…`, () => {
+    const c2 = state?.classes.find((c) => c.id === classId);
+    const i = c2 ? c2.assets.findIndex((x) => x.id === assetId) : -1;
+    if (i < 0) { toast('Não dá mais para desfazer.'); return; }
+    c2.assets[i] = backup;
+    scheduleSave(); renderAtivos(); renderTopbar(); if (activeTab === 'aporte') renderAporteTab(); if (activeTab === 'painel') renderPainel(); debounceQuoteRefresh();
+    toast(`${from} de volta.`);
+  });
+}
+async function askManualSwap(classId, assetId) {
+  const cls = state?.classes.find((c) => c.id === classId);
+  const a = cls?.assets.find((x) => x.id === assetId);
+  if (!cls || !a) return;
+  const from = normTicker(a.ticker);
+  const res = await dialog({
+    title: `${from} mudou de código?`,
+    html: `<p style="font-size:13px; color:var(--text-muted);">Use quando o ativo foi incorporado, trocou de gestão ou de código. A proporção está no fato relevante do ativo (ex.: BCFF11 → BTHF11 foi 0,8: cada 10 cotas viraram 8).</p>
+      <div class="field"><label for="swap-to">Ticker novo</label><input id="swap-to" class="plain-input" maxlength="12" autocomplete="off" spellcheck="false" style="text-transform:uppercase" placeholder="ex.: BTHF11"></div>
+      <div class="field" style="margin-top:10px;"><label for="swap-factor">Cotas novas para cada cota antiga</label><input id="swap-factor" class="plain-input" inputmode="decimal" value="1"></div>`,
+    buttons: [{ label: 'Cancelar', value: null }, { label: 'Continuar', kind: 'primary', value: (box) => ({ to: box.querySelector('#swap-to').value, factor: parseNum(box.querySelector('#swap-factor').value) }),
+      validate: (box) => {
+        const to = normTicker(box.querySelector('#swap-to').value).replace(/\s+/g, '');
+        const f = parseNum(box.querySelector('#swap-factor').value);
+        if (!isQuotableTicker(to)) { toast('Digite o ticker novo (só letras e números).'); return false; }
+        if (!(f > 0 && f <= 1000)) { toast('Digite a proporção (ex.: 1 ou 0,8).'); return false; }
+        return true;
+      } }],
+    onOpen: (box) => box.querySelector('#swap-to')?.focus(),
+  });
+  if (res) await swapTicker(classId, assetId, res.to, res.factor, null);
 }
 
 function renderAtivos() {
@@ -1240,12 +1351,10 @@ function renderAtivos() {
     card.querySelector('[data-action="auto-price"]')?.addEventListener('click', () => { a.priceMode = 'auto'; scheduleSave(); again(); });
     card.querySelector('[data-action="use-old-price"]')?.addEventListener('click', () => { a.price = cleanPrice(cls, a.price); a.priceMode = 'manual'; scheduleSave(); again(); toast('Usando o preço digitado. Confira se ele ainda vale.'); });
     card.querySelector('[data-action="rename"]')?.addEventListener('click', (e) => {
-      const to = e.currentTarget.dataset.to;
-      if (cls.assets.some((x) => x.id !== a.id && normTicker(x.ticker) === to)) { toast(`${to} já está nesta classe.`); return; }
-      a.ticker = to; a.priceMode = 'auto'; a.lastQuotePrice = 0;
-      scheduleSave(); renderAtivos(); renderTopbar(); debounceQuoteRefresh();
-      toast(`Trocado para ${to}. Buscando a cotação…`);
+      const ch = TICKER_CHANGES[normTicker(a.ticker)];
+      if (ch) swapTicker(cls.id, a.id, ch.to, ch.factor, ch.date);
     });
+    card.querySelector('[data-action="swap-manual"]')?.addEventListener('click', () => askManualSwap(cls.id, a.id));
     card.querySelector('[data-action="toggle-term"]').addEventListener('click', (e) => {
       const open = card.querySelector('[data-term-panel]').classList.toggle('open');
       if (open) openTermPanels.add(a.id); else openTermPanels.delete(a.id);

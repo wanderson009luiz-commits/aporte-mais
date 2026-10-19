@@ -21,5 +21,14 @@
     return { agenda: { weekday: 1, frequency: 'semanal', customNote: '', dayOfMonth: 5, lastAporteDate: null }, aportes: [], classes, timeline: [], dividendos: [] };
   }
   const Q = { ABEV3: 16.84, BBAS3: 23.63, BBSE3: 42.08, BRCR11: 45.7, CPTS11: 7.79, DEVA11: 17.9, DIVO11: 145.28, EGIE3: 31.32, FLRY3: 27.11, GRND3: 4.5, HGLG11: 156.42, HGRE11: 124.79, HGRU11: 123.38, ITSA4: 15.43, IVVB11: 438.55, KLBN4: 3.61, KNRI11: 161.95, LEVE3: 37.2, MXRF11: 9.34, NASD11: 20.63, RANI3: 8, SAPR11: 40, SOJA3: 8, TAEE11: 44.56, TOTS3: 40.29, VALE3: 66.21, VILG11: 100.5, VISC11: 113.6, VIVA3: 26.69, VRTA11: 75.4, WEGE3: 47.99, WRLD11: 144.11, XPLG11: 99.89, XPML11: 105.99, 'CRYPTO:BTC': 409696, 'CRYPTO:ETH': 11936.55, 'US:AAPL': 343.46, BTHF11: 8.94, PMLL11: 108.99, 'US:VOO': 512.7 };
-  window.__FIXTURES = { antiga: v2State(true, true), zerada: v2State(false, false), quotes: Q, fx: { 'USD-BRL': 5.0645, 'EUR-BRL': 5.6633 }, unknown: ['BCFF11', 'MALL11'] };
+  // carteira com cotas em tickers que mudaram de código (e um que a fonte não reconhece)
+  function trocas() {
+    const s = v2State(false, false);
+    const f = s.classes.find((c) => c.id === 'fiis');
+    f.assets.find((a) => a.ticker === 'BCFF11').qty = 13;
+    f.assets.find((a) => a.ticker === 'MALL11').qty = 5;
+    const d = f.assets.find((a) => a.ticker === 'DEVA11'); d.ticker = 'DEVA12'; d.qty = 20;
+    return s;
+  }
+  window.__FIXTURES = { antiga: v2State(true, true), zerada: v2State(false, false), trocas: trocas(), quotes: Q, fx: { 'USD-BRL': 5.0645, 'EUR-BRL': 5.6633 }, unknown: ['BCFF11', 'MALL11', 'DEVA12'] };
 })();
