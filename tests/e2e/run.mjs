@@ -555,6 +555,31 @@ console.log('\n21) Duplo clique em "Registrar" não fecha a confirmação');
   await page.close();
 }
 
+
+// ---------------------------------------------------------------- 22
+console.log('\n22) Exportar backup salva a carteira de verdade; aviso que sumiu não recebe clique');
+{
+  const page = await openApp('scenario=zerada&run=22');
+  await page.click('.nav-btn[data-tab="config"]');
+  const dl = page.waitForEvent('download');
+  await page.click('#btn-export-backup');
+  const file = await (await dl).path();
+  const bk = JSON.parse(fs.readFileSync(file, 'utf8'));
+  check(bk.app === 'aporte-mais' && Array.isArray(bk.state?.classes) && bk.state.classes.length === 6, `backup tem a carteira (${bk.state?.classes?.length} classes)`);
+  // remover a classe Criptomoedas, esperar o aviso sumir e clicar onde ele estava
+  const row = page.locator('#class-list .class-row').filter({ has: page.locator('[data-f="name"][value="Criptomoedas"]') });
+  await row.locator('[data-action="remove"]').click();
+  await confirmModal(page);
+  await page.waitForSelector('#toast.show #toast-action');
+  const box = await page.locator('#toast-action').boundingBox();
+  await page.waitForFunction(() => !document.querySelector('#toast').classList.contains('show'), null, { timeout: 15000 });
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(400);
+  const names = await page.evaluate(() => [...document.querySelectorAll('#class-list [data-f="name"]')].map((i) => i.value));
+  check(!names.includes('Criptomoedas'), 'clique onde estava o "Desfazer" (já sumido) não traz a classe de volta');
+  await page.close();
+}
+
 console.log(`\n${passes} ok, ${failures} falha(s)`);
 if (errors.length) { console.log('\nErros de JavaScript na página:'); errors.forEach((e) => console.log('  ' + e)); }
 await browser.close();

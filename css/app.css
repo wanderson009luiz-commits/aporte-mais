@@ -503,3 +503,4 @@ input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 2px rgba(21
 .frac-note{font-size:11px; color:var(--text-faint);}
 .modal ul{margin:8px 0 14px; padding-left:18px; font-size:13px; line-height:1.55;}
 .aporte-row .v{white-space:nowrap;}
+.toast:not(.show){pointer-events:none !important;}

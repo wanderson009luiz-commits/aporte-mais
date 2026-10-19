@@ -117,14 +117,21 @@ function fieldOr(input, opts, apply) {
 // Avisos e diálogos
 // ---------------------------------------------------------------------
 let toastTimer = null;
+function hideToast() {
+  const t = $('toast');
+  clearTimeout(toastTimer);
+  t.classList.remove('show');
+  t.style.pointerEvents = 'none';
+  const b = $('toast-action'); if (b) { b.onclick = null; b.disabled = true; } // botão escondido não age mais
+}
 function toast(msg, opts = {}) {
   const t = $('toast');
   t.innerHTML = esc(msg) + (opts.action ? ` <button class="link-btn" id="toast-action" style="font-size:12px; margin-left:8px;">${esc(opts.action.label)}</button>` : '');
   t.classList.add('show');
-  if (opts.action) $('toast-action').onclick = () => { t.classList.remove('show'); opts.action.run(); };
+  if (opts.action) $('toast-action').onclick = () => { hideToast(); opts.action.run(); };
   t.style.pointerEvents = opts.action ? 'auto' : 'none';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), opts.ms || (opts.action ? 9000 : 3600));
+  toastTimer = setTimeout(hideToast, opts.ms || (opts.action ? 9000 : 3600));
 }
 
 /**
@@ -378,7 +385,7 @@ function resetUI() {
   if ($('sidebar-user')) $('sidebar-user').textContent = '';
   if ($('account-email')) $('account-email').textContent = '—';
   if ($('patrimonio-total')) $('patrimonio-total').textContent = 'R$ 0,00';
-  $('toast')?.classList.remove('show');
+  hideToast();
   try { history.replaceState(null, '', location.pathname + location.search); } catch { /* sem histórico */ }
 }
 function showMigrationNotes() {
@@ -1062,7 +1069,7 @@ async function registrarAporte() {
     const saved = await flushSave();
     if (reportSave(saved, 'Aporte registrado')) {
       toast(`Aporte registrado e salvo! Patrimônio: ${money(portfolioTotalBRL(state, quotes, fxCtx()))}.`, { action: { label: 'Desfazer', run: () => undoAporte(res.record.id) } });
-    } else $('toast').classList.remove('show');
+    } else hideToast();
   } finally { registering = false; }
 }
 
@@ -1528,7 +1535,9 @@ async function deleteDividendo(id) {
 // Backup
 // ---------------------------------------------------------------------
 function exportBackup(st = state, name = 'aporte-mais-backup') {
-  if (!st) return;
+  // proteção: só exporta uma carteira de verdade (nunca um evento de clique ou outro objeto qualquer)
+  if (!st || typeof st !== 'object' || !Array.isArray(st.classes)) st = state;
+  if (!st || !Array.isArray(st.classes)) { toast('Não há carteira carregada para exportar.'); return; }
   const payload = { app: 'aporte-mais', version: st.version, appVersion: APP_VERSION, exportedAt: new Date().toISOString(), state: st };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -1606,7 +1615,7 @@ function wire() {
     state.classes.push({ id: uid(), name: 'Nova classe', type: 'b3', hasAssets: true, idealPct: 0, isCash: false, currency: 'BRL', fractional: false, currentValue: 0, assets: [] });
     scheduleSave(); renderConfig();
   });
-  $('btn-export-backup').addEventListener('click', exportBackup);
+  $('btn-export-backup').addEventListener('click', () => exportBackup());
   $('btn-import-backup').addEventListener('click', () => $('input-import-backup').click());
   $('input-import-backup').addEventListener('change', importBackup);
   $('btn-change-pass').addEventListener('click', () => askNewPassword('Trocar senha'));
