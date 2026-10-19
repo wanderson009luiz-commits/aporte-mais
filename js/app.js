@@ -8,8 +8,9 @@ import {
   TICKER_CHANGES, convertQty, isISODate,
 } from './model.js?v=dev';
 import { planAporte, applyPlan, revertAporte, stateSignature, validateForPlan, alignmentScore } from './engine.js?v=dev';
+import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, isAttention, bySeverity, NEWS_WINDOW_DAYS } from './news.js?v=dev';
 
-const APP_VERSION = '4.1.0';
+const APP_VERSION = '4.2.0';
 const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
 // Chave pública (anon) — é feita para ficar no navegador; a proteção real são as regras RLS do banco.
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsZGl5bHl5bmtncHJwZnh5eWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxNjA4NTYsImV4cCI6MjEwNDczNjg1Nn0.mlv8I8EOtRhiZyw2PlVnp2mNMXLZCTJr0acDLMKKjy0';
@@ -35,6 +36,12 @@ let quotesRefreshing = false;
 let lastQuoteRefresh = 0;
 let quoteRefreshError = false;
 let sentimentCache = {};
+// notícias da carteira
+let newsRows = [];                // linhas limpas de ticker_news (só ativos da carteira)
+let newsChecks = new Map();       // chave → quando o servidor verificou pela última vez
+let newsLoadedAt = 0, lastNewsInvoke = 0, newsRun = 0;
+let newsLoading = false, newsFetching = false, newsError = '', newsAi = null;
+let newsFilter = 'todas', newsAssetFilter = '';
 let activeTab = 'painel';
 let activeAtivosClassId = null;
 let lastPlan = null;
@@ -365,6 +372,7 @@ async function bootFor(u) {
   showMigrationNotes();
   syncTrackedTickers();
   refreshSentimentCache().then(() => { if (activeTab === 'ativos') renderAtivos(); renderTopbar(); });
+  loadNews(); // em segundo plano: alertas no Painel e no menu assim que chegarem
   const ages = trackedTickers(state).map((t) => quotes[quoteKey(t.source, t.ticker)]?.updated_at).map((x) => (x ? Date.now() - new Date(x).getTime() : Infinity));
   if (ages.some((a) => a > QUOTE_MAX_AGE_MS)) refreshQuotes();
   else lastQuoteRefresh = Date.now();
@@ -374,6 +382,8 @@ function resetSession() {
   user = null; portfolioId = null; state = null; stateLoaded = false; lastUpdatedAt = null; conflict = false;
   booted = false; lastPlan = null; lastSyncedTickers = null; quotes = {}; failedQuoteKeys = new Set();
   sessionUndo = null; sentimentCache = {}; openTermPanels.clear(); pendingRender.clear();
+  newsRun++; newsRows = []; newsChecks = new Map(); newsLoadedAt = 0; lastNewsInvoke = 0;
+  newsLoading = false; newsFetching = false; newsError = ''; newsAi = null; newsFilter = 'todas'; newsAssetFilter = '';
 }
 /** Limpa tudo que estava na tela — a próxima pessoa que entrar neste navegador não vê nada da anterior. */
 function resetUI() {
@@ -382,7 +392,8 @@ function resetUI() {
   ['aporte-valor', 'aporte-obs', 'div-ticker', 'div-valor', 'div-data', 'auth-password', 'auth-email'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
   const chk = $('div-add-caixa'); if (chk) chk.checked = true;
   ['resultado-container', 'ready-card', 'painel-container', 'asset-list', 'class-list', 'aportes-card', 'proventos-card', 'timeline-container',
-    'ativos-class-tabs', 'fx-grid', 'agenda-detail', 'freq-options'].forEach((id) => { const el = $(id); if (el) el.innerHTML = ''; });
+    'ativos-class-tabs', 'fx-grid', 'agenda-detail', 'freq-options', 'news-container', 'news-status'].forEach((id) => { const el = $(id); if (el) el.innerHTML = ''; });
+  if ($('news-badge')) $('news-badge').hidden = true;
   if ($('sidebar-user')) $('sidebar-user').textContent = '';
   if ($('account-email')) $('account-email').textContent = '—';
   if ($('patrimonio-total')) $('patrimonio-total').textContent = 'R$ 0,00';
@@ -680,9 +691,144 @@ async function refreshSentimentCache() {
 }
 
 // ---------------------------------------------------------------------
+// Notícias
+// ---------------------------------------------------------------------
+const NEWS_STALE_MS = 2 * 3600e3;
+const IMPACT_TXT = { alto: 'Impacto alto', medio: 'Impacto médio', baixo: 'Impacto baixo' };
+const DIR_TXT = { positivo: '▲ Boa', negativo: '▼ Ruim', neutro: '• Neutra' };
+const tickerOfKey = (k) => String(k).replace(/^(US|CRYPTO):/, '');
+const newsAiOn = () => (newsAi !== null ? newsAi : newsRows.some((n) => n.byAi));
+
+async function readNews(keys) {
+  const since = new Date(Date.now() - NEWS_WINDOW_DAYS * 864e5).toISOString();
+  const rows = []; const checks = new Map();
+  for (let i = 0; i < keys.length; i += 100) {
+    const part = keys.slice(i, i + 100);
+    const { data, error } = await sb.from('ticker_news').select('id, ticker, title, url, source, published_at, impact, direction, relevant, summary, classified_by')
+      .in('ticker', part).gte('published_at', since).order('published_at', { ascending: false }).limit(1000);
+    if (error) throw error;
+    rows.push(...(data || []));
+    const { data: ch, error: e2 } = await sb.from('ticker_news_checks').select('ticker, checked_at').in('ticker', part);
+    if (e2) throw e2;
+    (ch || []).forEach((r) => checks.set(r.ticker, Date.parse(r.checked_at)));
+  }
+  newsRows = cleanNewsRows(rows);
+  newsChecks = checks;
+}
+/** Lê as notícias salvas e, se algum ativo não é verificado há 2 h (ou a pessoa pediu), pede ao servidor as novas. */
+async function loadNews({ force = false } = {}) {
+  if (!stateLoaded || !sb || !state) return;
+  const run = ++newsRun; // só a chamada mais recente mexe na tela (troca de conta, cliques repetidos)
+  const keys = [...newsAssets(state, quotes, fxCtx()).keys()];
+  if (!keys.length) { newsRows = []; newsLoadedAt = Date.now(); newsError = ''; renderNewsEverywhere(); return; }
+  newsLoading = true; newsError = ''; renderNewsEverywhere();
+  try {
+    await readNews(keys);
+    if (run !== newsRun) return;
+    const stale = keys.filter((k) => !(Date.now() - (newsChecks.get(k) || 0) < NEWS_STALE_MS));
+    if ((force || stale.length) && Date.now() - lastNewsInvoke > 60e3) {
+      lastNewsInvoke = Date.now();
+      newsFetching = true; renderNewsEverywhere();
+      await syncTrackedTickers(); // o servidor só busca tickers que estão na carteira de quem pede
+      const { data, error } = await sb.functions.invoke('news-refresh', { body: { tickers: keys } });
+      if (run !== newsRun) return;
+      if (error || !data?.ok) newsError = 'Não deu para buscar notícias novas agora — mostrando as que já estavam salvas.';
+      else { newsAi = !!data.ai; await readNews(keys); }
+    }
+  } catch (e) {
+    console.error('Falha ao carregar notícias', e);
+    if (run === newsRun) newsError = 'Não foi possível carregar as notícias. Verifique sua conexão e toque em Atualizar.';
+  } finally {
+    if (run === newsRun) { newsLoading = false; newsFetching = false; newsLoadedAt = Date.now(); renderNewsEverywhere(); }
+  }
+}
+function renderNewsEverywhere() {
+  if (!state) return;
+  updateNewsBadge();
+  if (activeTab === 'noticias') renderNoticias();
+  if (activeTab === 'painel') renderPainel();
+}
+/** Notícias que pedem atenção (impacto alto, ou médio e ruim, dos últimos 7 dias) nos ativos da carteira. */
+function newsAlerts() {
+  const assets = newsAssets(state, quotes, fxCtx());
+  return newsRows.filter((n) => assets.has(n.ticker) && isAttention(n)).sort(bySeverity);
+}
+function updateNewsBadge() {
+  const b = $('news-badge');
+  if (!b) return;
+  const n = state ? newsAlerts().length : 0;
+  b.hidden = n === 0;
+  b.textContent = n > 99 ? '99+' : String(n);
+  b.setAttribute('aria-label', `${n} ${n === 1 ? 'notícia pede' : 'notícias pedem'} atenção`);
+}
+function newsItemHtml(n, { showTicker = false } = {}) {
+  return `<article class="news-item imp-${n.impact} dir-${n.direction}">
+    <div class="news-tags"><span class="imp-tag ${n.impact}">${IMPACT_TXT[n.impact]}</span><span class="dir-tag ${n.direction}">${DIR_TXT[n.direction]}</span>${showTicker ? `<span class="news-tk">${esc(tickerOfKey(n.ticker))}</span>` : ''}</div>
+    <a class="news-title" href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>
+    ${n.summary ? `<p class="news-sum">${esc(n.summary)}</p>` : ''}
+    <div class="news-meta">${esc(n.source || 'Fonte')} · ${esc(ago(new Date(n.published).toISOString()))}${n.byAi ? '' : ' · classificação automática simples'}</div>
+  </article>`;
+}
+function renderNoticias() {
+  const box = $('news-container');
+  if (!box || !state) return;
+  const assets = newsAssets(state, quotes, fxCtx());
+  const list = [...assets.values()].sort((a, b) => a.ticker.localeCompare(b.ticker));
+  if (newsAssetFilter && !assets.has(newsAssetFilter)) newsAssetFilter = '';
+  const sel = $('news-asset');
+  sel.innerHTML = `<option value="">Todos os ativos (${list.length})</option>` + list.map((a) => `<option value="${esc(a.key)}"${a.key === newsAssetFilter ? ' selected' : ''}>${esc(a.ticker)}</option>`).join('');
+  const base = filterNews(newsRows, assets, { asset: newsAssetFilter });
+  const cnt = newsCounts(base);
+  const chipN = { todas: cnt.total, alto: cnt.alto, ruins: cnt.negativo, boas: cnt.positivo };
+  document.querySelectorAll('[data-nf]').forEach((b) => {
+    const on = b.dataset.nf === newsFilter;
+    b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.innerHTML = `${esc({ todas: 'Todas', alto: 'Impacto alto', ruins: 'Ruins', boas: 'Boas' }[b.dataset.nf])}<span class="n">${chipN[b.dataset.nf] ?? 0}</span>`;
+  });
+  const checked = [...newsChecks.values()].filter(Boolean);
+  const lastCheck = checked.length ? Math.max(...checked) : 0;
+  $('news-status').innerHTML = newsFetching ? 'Buscando notícias novas dos seus ativos…'
+    : newsLoading ? 'Carregando…'
+    : `${lastCheck ? `Verificado ${esc(ago(new Date(lastCheck).toISOString()))}` : 'Ainda sem verificação'}${newsError ? ` · <span class="warn-txt">${esc(newsError)}</span>` : ''}`;
+  if (!assets.size) { box.innerHTML = '<div class="empty-state">Cadastre seus ativos da bolsa, do exterior ou cripto em <b>Ativos</b> para ver as notícias deles aqui.</div>'; return; }
+  const rows = filterNews(newsRows, assets, { filter: newsFilter, asset: newsAssetFilter });
+  const attention = rows.filter((n) => isAttention(n)).sort(bySeverity);
+  const groups = groupByAsset(rows, assets);
+  const indirect = rows.filter((n) => !n.relevant).sort((a, b) => b.published - a.published);
+  const withNews = new Set(groups.map((g) => g.asset.key));
+  const quiet = list.filter((a) => !withNews.has(a.key) && (!newsAssetFilter || a.key === newsAssetFilter));
+  let html = '';
+  if (!newsRows.length && (newsLoading || newsFetching)) { box.innerHTML = '<div class="empty-state">Buscando as notícias dos seus ativos…</div>'; return; }
+  html += `<div class="news-summary"><span>Últimos ${NEWS_WINDOW_DAYS} dias:</span><span><b>${cnt.alto}</b> de impacto alto</span><span><b>${cnt.medio}</b> médio</span><span><b>${cnt.baixo}</b> baixo</span><span><b style="color:var(--coral)">${cnt.negativo}</b> ruins</span><span><b style="color:var(--teal)">${cnt.positivo}</b> boas</span></div>`;
+  if (attention.length) {
+    html += `<div class="card news-attn"><h3 class="card-title">Precisa da sua atenção</h3><p class="card-sub">Impacto alto, ou médio e ruim, nos últimos 7 dias. Abra a notícia e veja se muda o seu plano para o ativo.</p>${attention.slice(0, 8).map((n) => newsItemHtml(n, { showTicker: true })).join('')}${attention.length > 8 ? `<div class="news-meta">+ ${attention.length - 8} abaixo, em cada ativo.</div>` : ''}</div>`;
+  }
+  groups.forEach((g) => {
+    const a = g.asset;
+    const w = a.weight != null ? `${pct1(a.weight)}% da carteira` : `alvo de ${pct1(a.target)}% da carteira`;
+    const first = g.items.slice(0, 3), rest = g.items.slice(3);
+    html += `<section class="card news-group"><header class="news-group-head"><div><span class="news-group-tk">${esc(a.ticker)}</span><span class="news-group-cls">${esc(a.cls)}</span></div>
+      <div class="news-group-meta">${w}${g.bad ? ` · <span class="bad">▼ ${g.bad} ${g.bad === 1 ? 'ruim' : 'ruins'}</span>` : ''}${g.good ? ` · <span class="good">▲ ${g.good} ${g.good === 1 ? 'boa' : 'boas'}</span>` : ''}</div></header>
+      ${first.map((n) => newsItemHtml(n)).join('')}
+      ${rest.length ? `<details class="news-more"><summary>Mais ${rest.length} ${rest.length === 1 ? 'notícia' : 'notícias'} de ${esc(a.ticker)}</summary>${rest.map((n) => newsItemHtml(n)).join('')}</details>` : ''}</section>`;
+  });
+  if (!groups.length && !attention.length) {
+    html += `<div class="empty-state">${newsFilter === 'todas' ? 'Nenhuma notícia sobre os seus ativos nos últimos dias.' : 'Nenhuma notícia com esse filtro.'}</div>`;
+  }
+  if (indirect.length) {
+    html += `<div class="card"><details class="news-more"><summary>Menções em listas e resumos do mercado (${indirect.length})</summary><p class="news-foot">O ativo aparece citado, mas a notícia não é sobre ele.</p>${indirect.slice(0, 30).map((n) => newsItemHtml(n, { showTicker: true })).join('')}</details></div>`;
+  }
+  if (quiet.length && newsFilter === 'todas') {
+    html += `<div class="card"><h3 class="card-title" style="font-size:14px;">Sem notícias nos últimos ${NEWS_WINDOW_DAYS} dias</h3><div class="news-quiet">${quiet.map((a) => `<span>${esc(a.ticker)}</span>`).join('')}</div></div>`;
+  }
+  html += `<p class="news-foot">Notícias do Google Notícias, só dos seus ativos. ${newsAiOn() ? 'Impacto, direção e resumo feitos por IA a partir do título.' : 'Classificação automática simples, por palavras do título — com a IA ligada, cada notícia ganha um resumo e uma leitura melhor do impacto.'} Não é recomendação de compra ou venda: abra a notícia, veja a fonte e decida.</p>`;
+  box.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------
 // Navegação
 // ---------------------------------------------------------------------
-const TABS = ['painel', 'aporte', 'ativos', 'config', 'agenda', 'timeline'];
+const TABS = ['painel', 'aporte', 'noticias', 'ativos', 'config', 'agenda', 'timeline'];
 function switchTab(tab) {
   if (!TABS.includes(tab)) tab = 'painel';
   activeTab = tab;
@@ -691,6 +837,7 @@ function switchTab(tab) {
   window.scrollTo(0, 0);
   if (tab === 'painel') renderPainel();
   if (tab === 'aporte') renderAporteTab();
+  if (tab === 'noticias') { renderNoticias(); if (Date.now() - newsLoadedAt > 15 * 60e3 && !newsLoading) loadNews(); }
   if (tab === 'ativos') renderAtivos();
   if (tab === 'config') renderConfig();
   if (tab === 'agenda') renderAgenda();
@@ -839,8 +986,9 @@ function renderPainel() {
     <div class="kpi"><div class="k">Alinhamento com o plano</div><div class="v" style="color:${alignColor}">${align === null ? '—' : pct1(align) + '%'}</div><div class="s">${align === null ? 'Cadastre suas quantidades para medir' : align >= 90 ? 'Carteira próxima do ideal' : align >= 75 ? 'Alguns ajustes pendentes' : 'Carteira longe do plano'}</div></div>
   </div>`;
   const changes = tickerChangeAlerts();
-  if (changes.length) {
-    html += `<div class="card attention-card"><h3 class="card-title">Precisa da sua atenção</h3>${changes.map(({ c: cl, a, ch }) => `<div class="attn-row"><div class="attn-txt"><b>${esc(normTicker(a.ticker))}</b> ${esc(ch.note)}.</div><button class="btn btn-sm" data-swap-c="${esc(cl.id)}" data-swap-a="${esc(a.id)}">${esc(swapLabel(cl, a, ch.to, ch.factor))}</button></div>`).join('')}</div>`;
+  const alerts = newsAlerts();
+  if (changes.length || alerts.length) {
+    html += `<div class="card attention-card"><h3 class="card-title">Precisa da sua atenção</h3>${changes.map(({ c: cl, a, ch }) => `<div class="attn-row"><div class="attn-txt"><b>${esc(normTicker(a.ticker))}</b> ${esc(ch.note)}.</div><button class="btn btn-sm" data-swap-c="${esc(cl.id)}" data-swap-a="${esc(a.id)}">${esc(swapLabel(cl, a, ch.to, ch.factor))}</button></div>`).join('')}${alerts.slice(0, 3).map((n) => `<div class="attn-row"><div class="attn-txt"><span class="imp-tag ${n.impact}">${IMPACT_TXT[n.impact]}</span> <span class="dir-tag ${n.direction}">${DIR_TXT[n.direction]}</span> <b>${esc(tickerOfKey(n.ticker))}</b>: <a class="news-title" style="display:inline; font-size:13.5px;" href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div></div>`).join('')}${alerts.length ? `<div class="attn-row"><div class="attn-txt" style="color:var(--text-muted);">${alerts.length} ${alerts.length === 1 ? 'notícia pede' : 'notícias pedem'} atenção nos últimos 7 dias.</div><button class="btn btn-sm" data-goto="noticias">Ver notícias</button></div>` : ''}</div>`;
   }
   let distHtml;
   if (total <= 0) {
@@ -1399,7 +1547,7 @@ function renderAtivos() {
 }
 function renderSentimentBox(ticker) {
   const s = sentimentCache[normTicker(ticker)];
-  if (!s) return '<div class="sentiment-empty">Leitura automática de notícias ainda não ativada para este ativo.</div>';
+  if (!s) return '<div class="sentiment-empty">As notícias deste ativo, com impacto e se são boas ou ruins, ficam na aba Notícias.</div>';
   const srcList = Array.isArray(s.sources) ? s.sources.filter((x) => x && typeof x === 'object') : [];
   const sources = srcList.slice(0, 2).map((src) => { const u = String(src.url || ''); return /^https?:\/\//i.test(u) ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(src.title || 'fonte')}</a>` : esc(src.title || ''); }).join(' · ');
   return `<div class="sentiment-head"><span class="sentiment-badge ${esc(s.label)}">${esc({ alta: 'Alta', baixa: 'Baixa', neutro: 'Neutro', sem_novidade: 'Sem novidade' }[s.label] || s.label)}</span><span class="num" style="font-size:12px; color:var(--text-faint);">${Number(s.score) || 0}/100</span></div><div class="sentiment-summary">${esc(s.summary || '')}</div><div class="sentiment-meta">${s.session === 'abertura' ? 'Abertura' : 'Fechamento'} · ${fmtDateBR(s.session_date)}${sources ? ' · ' + sources : ''}</div>`;
@@ -1749,7 +1897,14 @@ function wire() {
   $('quote-chip').addEventListener('click', () => refreshQuotes({ silent: false }));
   $('aporte-form').addEventListener('submit', (e) => { e.preventDefault(); calcular(); });
   $('btn-refresh-prices').addEventListener('click', () => refreshQuotes({ silent: false }));
-  $('btn-refresh-sentiment').addEventListener('click', async () => { await refreshSentimentCache(); renderAtivos(); toast(Object.keys(sentimentCache).length ? 'Leitura de notícias atualizada.' : 'A leitura automática de notícias ainda não está ativada.'); });
+  $('btn-refresh-sentiment').addEventListener('click', () => switchTab('noticias'));
+  document.querySelectorAll('[data-nf]').forEach((b) => b.addEventListener('click', () => { newsFilter = b.dataset.nf; renderNoticias(); }));
+  $('news-asset').addEventListener('change', (e) => { newsAssetFilter = e.target.value; renderNoticias(); });
+  $('btn-refresh-news').addEventListener('click', () => {
+    if (newsLoading || newsFetching) return;
+    if (Date.now() - lastNewsInvoke < 60e3) { toast('As notícias acabaram de ser verificadas. Tente de novo em um minuto.'); return; }
+    loadNews({ force: true });
+  });
   $('btn-add-asset').addEventListener('click', () => {
     const cls = state.classes.find((c) => c.id === activeAtivosClassId);
     if (!cls) return;

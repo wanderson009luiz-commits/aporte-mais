@@ -645,7 +645,8 @@ console.log('\n24) Troca de ticker com conversão: BCFF11 → BTHF11 (0,8), MALL
   const ready2 = await txt(page, '#ready-card');
   check(!/BCFF11/.test(ready2) && !/MALL11/.test(ready2), 'depois das trocas o checklist não fala mais de BCFF11/MALL11');
   await page.click('.nav-btn[data-tab="painel"]'); await page.waitForTimeout(200);
-  check(!/Precisa da sua atenção/.test(await txt(page, '#painel-container')), 'Painel sem pendências depois das trocas');
+  const pain2 = await txt(page, '#painel-container');
+  check(!/Trocar para/.test(pain2) && !/BCFF11|MALL11/.test(pain2), 'Painel sem trocas pendentes depois das trocas');
   // troca manual de um ticker que a fonte não reconhece
   await page.click('.nav-btn[data-tab="ativos"]');
   await page.click('.class-tab:has-text("FIIs")');
@@ -676,6 +677,73 @@ console.log('\n24) Troca de ticker com conversão: BCFF11 → BTHF11 (0,8), MALL
   await page.click('.nav-btn[data-tab="aporte"]'); await page.waitForTimeout(200);
   check(/Nenhuma quantidade informada/.test(await txt(page, '#ready-card')), 'carteira sem nenhuma cota avisa que a sugestão considera a carteira vazia');
   await page.close();
+}
+
+// ---------------------------------------------------------------- 26
+console.log('\n26) Notícias: só da carteira, impacto e boa/ruim, alertas no Painel e no menu, filtros, links seguros');
+{
+  const page = await newPage('scenario=zerada&run=26');
+  await page.waitForSelector('#app-root:not([style*="none"])');
+  await page.waitForFunction(() => !document.querySelector('#news-badge')?.hidden, null, { timeout: 8000 });
+  const badge = await txt(page, '#news-badge');
+  check(badge === '2', `menu mostra 2 notícias pedindo atenção (VALE3 alto ruim, MXRF11 médio ruim) — obtido ${badge}`);
+  const painel = (await txt(page, '#painel-container')).replace(/\s+/g, ' ');
+  check(/Precisa da sua atenção/.test(painel) && /VALE3/.test(painel) && /rompimento de barragem/.test(painel) && /Ver notícias/.test(painel), 'Painel abre com o alerta da VALE3 e o botão Ver notícias');
+  check(!/Petrobras corta/.test(painel), 'Painel não mostra notícia de ativo fora da carteira');
+  await page.click('#painel-container [data-goto="noticias"]');
+  await page.waitForSelector('#news-container .news-item');
+  const all = (await txt(page, '#news-container')).replace(/\s+/g, ' ');
+  check(/Precisa da sua atenção/.test(all) && all.indexOf('rompimento de barragem') < all.indexOf('MXRF11 reduz dividendos'), 'atenção: VALE3 (alto) antes de MXRF11 (médio ruim)');
+  check(/Impacto alto/i.test(all) && /▼ Ruim/i.test(all) && /▲ Boa/i.test(all), 'cada notícia mostra impacto e se é boa ou ruim');
+  check(/Acidente pode gerar multas/.test(all), 'resumo da IA aparece');
+  check(!/Petrobras corta/.test(all) && !/Notícia velha/.test(all), 'nada fora da carteira nem com mais de 10 dias');
+  check(/Menções em listas e resumos do mercado \(1\)/.test(all), 'menção indireta (lista de FIIs) fica separada');
+  check(/Sem notícias nos últimos 10 dias/.test(all) && /IVVB11/.test(all.split('Sem notícias nos últimos 10 dias')[1] || ''), 'lista os ativos sem notícias');
+  const xss = await page.evaluate(() => ({ flag: window.__xss === 1, imgs: document.querySelectorAll('#news-container img').length }));
+  check(!xss.flag && xss.imgs === 0, 'título com HTML vira texto (não executa nada)');
+  const links = await page.evaluate(() => [...document.querySelectorAll('#news-container a.news-title')].map((a) => [a.getAttribute('href'), a.target, a.rel]));
+  check(links.length > 0 && links.every(([h, tg, rel]) => /^https:\/\//.test(h) && tg === '_blank' && /noopener/.test(rel) && /noreferrer/.test(rel)), 'links https abrem em nova aba sem expor o app');
+  await page.screenshot({ path: `${shots}/26-noticias-desktop.png`, fullPage: true });
+  await page.click('[data-nf="ruins"]');
+  const ruins = await page.$$eval('#news-container .news-item', (els) => els.map((e) => e.className));
+  check(ruins.length > 0 && ruins.every((c) => /dir-negativo/.test(c)), `filtro Ruins mostra só notícias ruins (${ruins.length})`);
+  await page.click('[data-nf="boas"]');
+  const boas = await page.$$eval('#news-container .news-item', (els) => els.map((e) => e.className));
+  check(boas.length > 0 && boas.every((c) => /dir-positivo/.test(c)), `filtro Boas mostra só notícias boas (${boas.length})`);
+  await page.click('[data-nf="todas"]');
+  await page.selectOption('#news-asset', 'WEGE3');
+  const weg = (await txt(page, '#news-container')).replace(/\s+/g, ' ');
+  check(/WEG tem lucro recorde/.test(weg) && !/rompimento/.test(weg), 'escolher um ativo mostra só as notícias dele');
+  await page.selectOption('#news-asset', '');
+  await page.click('#btn-refresh-news');
+  await page.waitForTimeout(300);
+  check(/acabaram de ser verificadas/.test(await txt(page, '#toast')), 'Atualizar logo depois da busca explica que acabou de verificar');
+  const calls = await page.evaluate(() => window.__fakeDb().calls.news);
+  check(calls === 1, `uma única busca no servidor ao abrir (obtido ${calls})`);
+  await page.close();
+  // celular: sem rolagem lateral e com o selo no menu de baixo
+  const m = await newPage('scenario=zerada&run=27', { width: 375, height: 800 });
+  await m.waitForSelector('#app-root:not([style*="none"])');
+  await m.waitForFunction(() => !document.querySelector('#news-badge')?.hidden, null, { timeout: 8000 });
+  await m.click('.nav-btn[data-tab="noticias"]');
+  await m.waitForSelector('#news-container .news-item');
+  const ov = await m.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check(ov <= 0, `celular: Notícias sem rolagem lateral (${ov}px)`);
+  await m.screenshot({ path: `${shots}/26b-noticias-celular.png`, fullPage: true });
+  const s320 = await newPage('scenario=zerada&run=28', { width: 320, height: 700 });
+  await s320.waitForSelector('#app-root:not([style*="none"])');
+  await s320.waitForTimeout(600);
+  const ov2 = await s320.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  check(ov2 <= 0, `320px: menu com 7 itens cabe sem rolagem lateral (${ov2}px)`);
+  await s320.screenshot({ path: `${shots}/26c-menu-320.png` });
+  await m.close(); await s320.close();
+  // função de notícias fora do ar: mostra o que já estava salvo e avisa
+  const f = await newPage('scenario=zerada&run=29&news=fail');
+  await f.waitForSelector('#app-root:not([style*="none"])');
+  await f.click('.nav-btn[data-tab="noticias"]');
+  await f.waitForFunction(() => /Não deu para buscar|Nenhuma notícia/.test(document.querySelector('#tab-noticias')?.textContent || ''), null, { timeout: 8000 });
+  check(/Não deu para buscar notícias novas agora/.test(await txt(f, '#news-status')), 'função fora do ar: aviso claro, sem quebrar a tela');
+  await f.close();
 }
 
 console.log(`\n${passes} ok, ${failures} falha(s)`);

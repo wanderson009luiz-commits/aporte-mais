@@ -56,8 +56,9 @@ jobs:
           cp -r index.html manifest.webmanifest icon.svg icon-192.png icon-512.png .nojekyll css js _site/
           # cada publicação ganha um carimbo próprio: o navegador nunca mistura arquivo novo com antigo
           V="${GITHUB_SHA::7}"
-          sed -i "s/?v=dev/?v=$V/g" _site/index.html _site/js/app.js _site/js/engine.js
-          grep -c "?v=$V" _site/index.html _site/js/app.js _site/js/engine.js
+          sed -i "s/?v=dev/?v=$V/g" _site/index.html _site/js/app.js _site/js/engine.js _site/js/news.js
+          grep -c "?v=$V" _site/index.html _site/js/app.js _site/js/engine.js _site/js/news.js
+          ! grep -rn "?v=dev" _site/index.html _site/js/*.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

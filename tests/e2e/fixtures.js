@@ -30,5 +30,16 @@
     const d = f.assets.find((a) => a.ticker === 'DEVA11'); d.ticker = 'DEVA12'; d.qty = 20;
     return s;
   }
-  window.__FIXTURES = { antiga: v2State(true, true), zerada: v2State(false, false), trocas: trocas(), quotes: Q, fx: { 'USD-BRL': 5.0645, 'EUR-BRL': 5.6633 }, unknown: ['BCFF11', 'MALL11', 'DEVA12'] };
+  // notícias que a função "news-refresh" falsa grava (h = horas atrás)
+  const NEWS = [
+    { ticker: 'VALE3', h: 2, impact: 'alto', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'InfoMoney', title: 'Vale tem rompimento de barragem e suspende operações em mina', summary: 'Acidente pode gerar multas e paralisar parte da produção, pressionando resultado e dividendos.' },
+    { ticker: 'MXRF11', h: 5, impact: 'medio', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'FIIs.com.br', title: 'MXRF11 reduz dividendos para R$ 0,09 por cota', summary: 'Rendimento mensal cai pela inadimplência de um CRI da carteira.' },
+    { ticker: 'WEGE3', h: 8, impact: 'medio', direction: 'positivo', relevant: true, classified_by: 'ia', source: 'Valor', title: 'WEG tem lucro recorde no 3º trimestre e supera estimativas', summary: 'Lucro acima do esperado reforça a tese de crescimento.' },
+    { ticker: 'CRYPTO:BTC', h: 3, impact: 'baixo', direction: 'positivo', relevant: true, classified_by: 'regras', source: 'Cointelegraph', title: 'Bitcoin sobe 3% e volta a US$ 82 mil', summary: null },
+    { ticker: 'HGLG11', h: 6, impact: 'baixo', direction: 'neutro', relevant: false, classified_by: 'ia', source: 'Suno', title: '10 FIIs para investir: HGLG11, XPML11, KNRI11 e BTLG11', summary: 'Lista de recomendações; não é sobre o fundo.' },
+    { ticker: 'XPLG11', h: 7, impact: 'baixo', direction: 'neutro', relevant: true, classified_by: 'regras', source: 'Teste', title: '<img src=x onerror="window.__xss=1"> XPLG11 renova contrato', summary: null },
+    { ticker: 'PETR4', h: 1, impact: 'alto', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'X', title: 'Petrobras corta dividendos (não está na carteira)', summary: 'Não deve aparecer.' },
+    { ticker: 'VALE3', h: 24 * 20, impact: 'alto', direction: 'negativo', relevant: true, classified_by: 'ia', source: 'X', title: 'Notícia velha da Vale (20 dias)', summary: 'Fora da janela.' },
+  ];
+  window.__FIXTURES = { antiga: v2State(true, true), zerada: v2State(false, false), trocas: trocas(), news: NEWS, quotes: Q, fx: { 'USD-BRL': 5.0645, 'EUR-BRL': 5.6633 }, unknown: ['BCFF11', 'MALL11', 'DEVA12'] };
 })();

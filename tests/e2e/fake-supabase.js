@@ -4,6 +4,7 @@
   const params = new URLSearchParams(location.search);
   const scenario = params.get('scenario') || 'zerada';
   const quotesMode = params.get('quotes') || 'ok';
+  const newsMode = params.get('news') || 'ok';
   const failSet = new Set((params.get('fail') || '').split(',').filter(Boolean));
   const F = window.__FIXTURES;
   const KEY = 'fake-db-' + scenario + '-' + (params.get('run') || '0');
@@ -11,7 +12,7 @@
   const nowIso = () => new Date().toISOString();
 
   function initialDb() {
-    const db = { users: [{ id: 'u1', email: 'pessoa@teste.com', password: 'senha12345' }, { id: 'u2', email: 'outra@teste.com', password: 'senha67890' }], portfolios: [], portfolio_state: [], tracked_tickers: [], ticker_quotes: [], exchange_rates: [], ticker_sentiment: [], calls: { invoke: 0, upsert_state: 0 } };
+    const db = { users: [{ id: 'u1', email: 'pessoa@teste.com', password: 'senha12345' }, { id: 'u2', email: 'outra@teste.com', password: 'senha67890' }], portfolios: [], portfolio_state: [], tracked_tickers: [], ticker_quotes: [], exchange_rates: [], ticker_sentiment: [], ticker_news: [], ticker_news_checks: [], calls: { invoke: 0, upsert_state: 0, news: 0 } };
     db.portfolios.push({ id: 'p1', user_id: 'u1', name: 'Minha carteira', created_at: '2026-09-13T22:53:30Z' });
     if (scenario === 'corrupt') db.portfolio_state.push({ portfolio_id: 'p1', state: { classes: 'quebrado', extra: 1 }, updated_at: '2026-10-11T16:34:43.576593+00:00' });
     else if (scenario !== 'new') db.portfolio_state.push({ portfolio_id: 'p1', state: JSON.parse(JSON.stringify(F[scenario] || F.zerada)), updated_at: '2026-10-11T16:34:43.576593+00:00' });
@@ -28,7 +29,7 @@
   window.__fakeDb = () => db;
   window.__fakeExternalSave = () => { const r = db.portfolio_state.find((x) => x.portfolio_id === 'p1'); r.updated_at = '2030-01-01T00:00:00.123456+00:00'; persist(); };
 
-  const PK = { portfolios: ['id'], portfolio_state: ['portfolio_id'], tracked_tickers: ['portfolio_id', 'ticker'], ticker_quotes: ['ticker'], exchange_rates: ['pair'], ticker_sentiment: ['ticker'] };
+  const PK = { portfolios: ['id'], portfolio_state: ['portfolio_id'], tracked_tickers: ['portfolio_id', 'ticker'], ticker_quotes: ['ticker'], exchange_rates: ['pair'], ticker_sentiment: ['ticker'], ticker_news: ['id'], ticker_news_checks: ['ticker'] };
   const keyOf = (t, r) => PK[t].map((k) => r[k]).join('|');
 
   class Q {
@@ -36,6 +37,7 @@
     select() { if (this.op !== 'select') this.ret = true; return this; }
     eq(c, v) { this.f.push((r) => String(r[c]) === String(v)); return this; }
     in(c, vs) { const s = new Set(vs.map(String)); this.f.push((r) => s.has(String(r[c]))); return this; }
+    gte(c, v) { this.f.push((r) => String(r[c]) >= String(v)); return this; }
     order() { return this; }
     limit(n) { this.lim = n; return this; }
     maybeSingle() { this.maybe = true; return this; }
@@ -80,6 +82,23 @@
     functions: {
       async invoke(name, { body } = {}) {
         await delay(120);
+        if (name === 'news-refresh') {
+          db.calls.news++;
+          if (newsMode === 'fail') return { data: null, error: { message: 'Edge Function returned a non-2xx status code' } };
+          // como o servidor: só tickers acompanhados pela carteira de quem pede
+          const mine = new Set(db.tracked_tickers.filter((t) => t.portfolio_id === 'p1').map((t) => t.ticker));
+          const wanted = ((body && body.tickers) || []).filter((k) => mine.has(k));
+          const now = Date.now();
+          (F.news || []).forEach((n, k) => {
+            if (!wanted.includes(n.ticker) && n.ticker !== 'PETR4') return; // PETR4: notícia de ativo de outra pessoa já no banco
+            const row = { id: 'n' + k, ticker: n.ticker, title: n.title, url: 'https://news.google.com/rss/articles/T' + k, source: n.source, published_at: new Date(now - n.h * 3600e3).toISOString(),
+              impact: n.impact, direction: n.direction, relevant: n.relevant, summary: n.summary, classified_by: n.classified_by, fetched_at: new Date(now).toISOString() };
+            if (!db.ticker_news.some((x) => x.id === row.id)) db.ticker_news.push(row);
+          });
+          wanted.forEach((k) => { const i = db.ticker_news_checks.findIndex((x) => x.ticker === k); const row = { ticker: k, checked_at: new Date(now).toISOString(), found: 1, ok: true }; if (i >= 0) db.ticker_news_checks[i] = row; else db.ticker_news_checks.push(row); });
+          persist();
+          return { data: { ok: true, mode: 'app', ai: true, checked: wanted.length }, error: null };
+        }
         db.calls.invoke++;
         if (quotesMode === 'fail') return { data: null, error: { message: 'Edge Function returned a non-2xx status code' } };
         const items = (body && body.items) || [];

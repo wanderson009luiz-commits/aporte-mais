@@ -511,3 +511,50 @@ input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 2px rgba(21
 .attn-row{display:flex; align-items:center; justify-content:space-between; gap:10px 14px; flex-wrap:wrap; padding:10px 0; border-top:1px solid var(--border);}
 .attention-card .card-title + .attn-row{border-top:none; padding-top:6px;}
 .attn-txt{flex:1 1 260px; font-size:13.5px; line-height:1.5; color:var(--text);}
+
+/* Notícias */
+.nav-btn{position:relative;}
+.nav-badge{margin-left:auto; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--coral); color:#1a1310; font-size:11px; font-weight:700; line-height:18px; text-align:center;}
+.news-toolbar{display:flex; justify-content:space-between; align-items:center; gap:10px 14px; flex-wrap:wrap; margin-bottom:12px;}
+.news-filters{display:flex; gap:6px; flex-wrap:wrap;}
+.news-filters .class-tab .n{opacity:.7; font-weight:500; margin-left:4px;}
+.news-actions{display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+.news-select{background:var(--surface); color:var(--text); border:1px solid var(--border-strong); border-radius:8px; padding:7px 10px; font-size:13px; max-width:100%;}
+.news-status{font-size:12.5px; color:var(--text-muted); margin:0 0 14px; min-height:18px; line-height:1.5;}
+.news-status .warn-txt{color:var(--amber);}
+.news-summary{display:flex; gap:8px 18px; flex-wrap:wrap; font-size:12.5px; color:var(--text-muted); margin-bottom:14px;}
+.news-summary b{color:var(--text); font-weight:600;}
+.news-attn{border-color:rgba(217,122,88,0.38);}
+.news-item{padding:12px 0; border-top:1px solid var(--border);}
+.news-item:first-of-type{border-top:none; padding-top:4px;}
+.news-tags{display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:6px;}
+.imp-tag,.dir-tag,.news-tk{font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; padding:2px 7px; border-radius:5px; border:1px solid transparent;}
+.imp-tag.alto{background:rgba(217,122,88,0.16); color:var(--coral); border-color:rgba(217,122,88,0.4);}
+.imp-tag.medio{background:rgba(211,171,92,0.13); color:var(--amber); border-color:rgba(211,171,92,0.35);}
+.imp-tag.baixo{background:var(--surface-2); color:var(--text-muted); border-color:var(--border-strong);}
+.dir-tag.negativo{color:var(--coral);}
+.dir-tag.positivo{color:var(--teal);}
+.dir-tag.neutro{color:var(--text-muted);}
+.news-tk{background:var(--surface-3); color:var(--text); letter-spacing:.02em;}
+.news-title{display:block; color:var(--text); font-size:14.5px; font-weight:600; line-height:1.4; text-decoration:none; overflow-wrap:anywhere;}
+.news-title:hover,.news-title:focus-visible{color:var(--brass); text-decoration:underline;}
+.news-sum{margin:5px 0 0; font-size:13px; color:var(--text-muted); line-height:1.5;}
+.news-meta{margin-top:5px; font-size:11.5px; color:var(--text-faint);}
+.news-group-head{display:flex; justify-content:space-between; align-items:baseline; gap:6px 12px; flex-wrap:wrap; margin-bottom:6px;}
+.news-group-tk{font-family:'Fraunces',serif; font-size:17px; font-weight:600; margin-right:8px;}
+.news-group-cls{font-size:12px; color:var(--text-faint);}
+.news-group-meta{font-size:12px; color:var(--text-muted);}
+.news-group-meta .bad{color:var(--coral);} .news-group-meta .good{color:var(--teal);}
+.news-more summary{cursor:pointer; color:var(--brass); font-size:12.5px; padding:8px 0 2px; list-style:none;}
+.news-more summary::-webkit-details-marker{display:none;}
+.news-quiet{display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;}
+.news-quiet span{font-size:11.5px; padding:3px 8px; border-radius:6px; background:var(--surface-2); color:var(--text-muted);}
+.news-foot{font-size:11.5px; color:var(--text-faint); line-height:1.55; margin-top:6px;}
+@media (max-width: 860px){
+  .nav-badge{position:absolute; top:2px; right:calc(50% - 22px); margin:0; min-width:16px; height:16px; line-height:16px; font-size:10px; padding:0 4px;}
+}
+@media (max-width: 640px){
+  .news-toolbar{flex-direction:column; align-items:stretch;}
+  .news-actions{justify-content:space-between;}
+  .news-select{flex:1;}
+}

@@ -60,6 +60,7 @@
     <nav aria-label="Seções">
       <button class="nav-btn" data-tab="painel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span class="full">Painel</span><span class="short">Painel</span></button>
       <button class="nav-btn" data-tab="aporte"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span class="full">Aporte</span><span class="short">Aporte</span></button>
+      <button class="nav-btn" data-tab="noticias"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h12v14H6a2 2 0 0 1-2-2z"/><path d="M16 8h4v9a2 2 0 0 1-2 2h-2"/><path d="M7.5 9h5M7.5 12.5h5M7.5 16h3"/></svg><span class="full">Notícias</span><span class="short">Notícias</span><span class="nav-badge" id="news-badge" hidden></span></button>
       <button class="nav-btn" data-tab="ativos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg><span class="full">Ativos</span><span class="short">Ativos</span></button>
       <button class="nav-btn" data-tab="config"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/></svg><span class="full">Configuração</span><span class="short">Classes</span></button>
       <button class="nav-btn" data-tab="agenda"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg><span class="full">Agenda</span><span class="short">Agenda</span></button>
@@ -108,6 +109,26 @@
       <div id="resultado-container"></div>
     </section>
 
+    <!-- NOTÍCIAS -->
+    <section id="tab-noticias" data-section hidden>
+      <h2 class="section-title">Notícias da sua carteira</h2>
+      <p class="section-sub">Só dos ativos que você tem, com o impacto (alto, médio ou baixo) e se a notícia é boa ou ruim para quem tem o ativo. O que pode mexer com a sua decisão aparece primeiro.</p>
+      <div class="news-toolbar">
+        <div class="news-filters" role="group" aria-label="Filtrar notícias">
+          <button class="class-tab active" data-nf="todas" aria-pressed="true">Todas</button>
+          <button class="class-tab" data-nf="alto" aria-pressed="false">Impacto alto</button>
+          <button class="class-tab" data-nf="ruins" aria-pressed="false">Ruins</button>
+          <button class="class-tab" data-nf="boas" aria-pressed="false">Boas</button>
+        </div>
+        <div class="news-actions">
+          <select id="news-asset" class="news-select" aria-label="Mostrar notícias de"><option value="">Todos os ativos</option></select>
+          <button class="btn btn-sm" id="btn-refresh-news">↻ Atualizar</button>
+        </div>
+      </div>
+      <div id="news-status" class="news-status" aria-live="polite"></div>
+      <div id="news-container"></div>
+    </section>
+
     <!-- ATIVOS -->
     <section id="tab-ativos" data-section hidden>
       <h2 class="section-title">Ativos por classe</h2>
@@ -115,7 +136,7 @@
       <div class="class-tabs" id="ativos-class-tabs"></div>
       <div style="margin-bottom:14px; display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn btn-sm" id="btn-refresh-prices">↻ Atualizar cotações agora</button>
-        <button class="btn btn-sm" id="btn-refresh-sentiment">↻ Leitura de notícias</button>
+        <button class="btn btn-sm" id="btn-refresh-sentiment">Notícias dos ativos</button>
       </div>
       <div id="asset-list"></div>
       <div class="config-total"><span class="label">Soma dos percentuais nesta classe</span><span class="val" id="asset-total-val">0%</span></div>
