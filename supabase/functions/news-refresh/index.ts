@@ -29,7 +29,8 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const ANTHROPIC_MODEL = Deno.env.get("NEWS_ANTHROPIC_MODEL") ?? "claude-haiku-5-5";
-const GEMINI_MODELS = (Deno.env.get("NEWS_GEMINI_MODEL") ?? "gemini-flash-latest,gemini-3.5-flash-lite").split(",").map((s) => s.trim()).filter(Boolean);
+// Flash-Lite primeiro: pensa pouco (responde rápido) e costuma estar menos congestionado no plano grátis
+const GEMINI_MODELS = (Deno.env.get("NEWS_GEMINI_MODEL") ?? "gemini-3.5-flash-lite,gemini-flash-latest").split(",").map((s) => s.trim()).filter(Boolean);
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const TICKER_RE = /^[A-Z0-9][A-Z0-9.\-]{0,14}$/;
@@ -373,8 +374,8 @@ async function callGemini(items: AiItem[], ms: number): Promise<unknown> {
       }),
       signal: AbortSignal.timeout(ms),
     });
-    if (r.status === 404 || r.status === 400) { console.error("gemini modelo", model, r.status, (await r.text()).slice(0, 200)); continue; }
-    if (!r.ok) { console.error("gemini", r.status, (await r.text()).slice(0, 300)); return null; }
+    // modelo inexistente, congestionado (503), limite do plano (429) ou erro do servidor: tenta o próximo da lista
+    if (!r.ok) { console.error("gemini", model, r.status, (await r.text()).slice(0, 200)); continue; }
     const j = await r.json();
     const text = (j?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? "").join("");
     try { return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "")); } catch { console.error("gemini json inválido"); return null; }

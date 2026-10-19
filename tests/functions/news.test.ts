@@ -18,6 +18,7 @@ const FEEDS: Record<string, string | number> = {};   // termo buscado → xml | 
 let rssCalls: string[] = [];
 let aiBodies: any[] = [];
 let aiMode: "ok" | "bad" | "down" = "ok";
+const GEMINI_STATUS: Record<string, number> = {}; // modelo → status de erro simulado
 g.fetch = async (url: string, init?: any) => {
   const u = new URL(url);
   if (u.host === "news.google.com") {
@@ -31,7 +32,11 @@ g.fetch = async (url: string, init?: any) => {
     const body = JSON.parse(init.body);
     aiBodies.push({ host: u.host, path: u.pathname, body, headers: init.headers });
     if (aiMode === "down") return new Response("err", { status: 529 });
-    if (u.host === "generativelanguage.googleapis.com" && u.pathname.includes("gemini-flash-latest")) return new Response("not found", { status: 404 });
+    if (u.host === "generativelanguage.googleapis.com") {
+      const model = decodeURIComponent(u.pathname.split("/").pop()!.split(":")[0]);
+      const st = GEMINI_STATUS[model];
+      if (st) return new Response(JSON.stringify({ error: { code: st, message: "This model is currently experiencing high demand." } }), { status: st });
+    }
     const text = u.host === "api.anthropic.com" ? body.messages[0].content : body.contents[0].parts[0].text;
     const items = JSON.parse(text.replace(/^Itens:\n/, ""));
     const itens = items.map((x: any) => ({
@@ -246,12 +251,27 @@ const MG = await import("../../supabase/functions/news-refresh/index.ts?gemini")
 const withGemini = handlers[handlers.length - 1];
 check(MG.aiProvider() === "gemini", "provedor: Gemini");
 aiMode = "ok";
+GEMINI_STATUS["gemini-3.5-flash-lite"] = 503; // congestionado (como em 19/10/2026)
 reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "VALE3" }] });
 FEEDS.VALE3 = rss([{ title: "Vale tem lucro recorde", source: "InfoMoney", h: 1 }]);
 r = await call(withGemini, { tickers: ["VALE3"] }, "USER-TOKEN");
 j = await r.json();
-check(aiBodies.length === 2 && aiBodies[0].path.includes("gemini-flash-latest") && aiBodies[1].path.includes("gemini-3.5-flash-lite"), "primeiro modelo 404 → usa o seguinte");
+check(aiBodies.length === 2 && aiBodies[0].path.includes("gemini-3.5-flash-lite") && aiBodies[1].path.includes("gemini-flash-latest"), "Flash-Lite primeiro; congestionado (503) → usa o seguinte");
+GEMINI_STATUS["gemini-3.5-flash-lite"] = 404; GEMINI_STATUS["gemini-flash-latest"] = 429;
+aiBodies = [];
+reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "WEGE3" }] });
+FEEDS.WEGE3 = rss([{ title: "WEG tem lucro recorde", source: "Valor", h: 1 }]);
+await call(withGemini, { tickers: ["WEGE3"] }, "USER-TOKEN");
+check(aiBodies.length === 2 && news("WEGE3")[0]?.classified_by === "regras", "todos os modelos falhando (404, 429): grava pelas regras, sem erro");
+delete GEMINI_STATUS["gemini-3.5-flash-lite"]; delete GEMINI_STATUS["gemini-flash-latest"];
+GEMINI_STATUS["gemini-3.5-flash-lite"] = 503;
+aiBodies = [];
+reset({ tracked_tickers: [{ portfolio_id: "p1", ticker: "VALE3" }] });
+FEEDS.VALE3 = rss([{ title: "Vale tem lucro recorde", source: "InfoMoney", h: 1 }]);
+r = await call(withGemini, { tickers: ["VALE3"] }, "USER-TOKEN");
+j = await r.json();
 check(aiBodies[1].headers["x-goog-api-key"] === "gm-test" && aiBodies[1].body.generationConfig.responseMimeType === "application/json", "chave no cabeçalho e resposta em JSON");
+delete GEMINI_STATUS["gemini-3.5-flash-lite"];
 check(news("VALE3")[0]?.classified_by === "ia" && news("VALE3")[0]?.direction === "positivo", "notícia classificada pela IA do Google");
 
 console.log("10) limites: por pessoa por hora, no total, e no máximo 150 tickers por pessoa");
