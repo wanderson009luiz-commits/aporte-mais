@@ -163,10 +163,12 @@ test('lote caro: a sobra compra a cota do ativo mais longe da sua parte', () => 
   const plan = planAporte(s, 105.27, {});
   assert.ok(plan.ok);
   const it = Object.fromEntries(plan.classes[0].items.map((x) => [x.a.ticker, x]));
-  // parte: CARO3 75, BARA3 25 → base: 0 CARO3 + 2 BARA3; sobra 80 não compra CARO3 (100) → mais BARA3? Não: BARA3 já está perto do alvo
+  // classe com R$ 100,01: alvo CARO3 R$ 75, BARA3 R$ 25. Antes: 3 BARA3 (R$ 30) e R$ 70 para o Caixa.
+  // Agora: 1 CARO3 (R$ 100) — a combinação mais perto do plano (desvio 6,25 mi × 105 mi centavos²)
   assert.equal(plan.investedBRL + plan.directBRL + plan.toCash, 10527);
-  assert.ok(it.BARA3.qty >= 2);
-  assert.ok(it.BARA3.value <= it.BARA3.deficit + it.BARA3.lotCost);
+  assert.equal(it.CARO3.qty, 1);
+  assert.equal(it.BARA3.qty, 0);
+  assert.equal(it.CARO3.complemento, true, 'a parte dele (R$ 75) não pagava a cota: marcado como complemento');
   const plan2 = planAporte(s, 200, {});
   const it2 = Object.fromEntries(plan2.classes[0].items.map((x) => [x.a.ticker, x]));
   assert.equal(it2.CARO3.qty, 1, 'com R$ 190 na classe, compra 1 CARO3 (parte 142,50)');

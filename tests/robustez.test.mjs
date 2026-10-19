@@ -2,7 +2,7 @@
 // Cada teste corresponde a um problema real encontrado — se algum voltar, o teste falha.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planAporte, applyPlan, revertAporte, fillLots, apportion, stateSignature, MIN_ORDER_CENTS } from '../js/engine.js';
+import { planAporte, applyPlan, revertAporte, fillLots, apportion, stateSignature, MIN_ORDER_CENTS, refineLots, lotsDeviation } from '../js/engine.js';
 import {
   migrateState, defaultState, parseNum, toCents, toNumber, portfolioTotalBRL, assetPrice, cleanPrice, buyMode,
   nextAporteDate, todayISO, classValueNative, convertQty, TICKER_CHANGES,
@@ -539,4 +539,59 @@ test('troca de ticker: migração guarda a época das cotas e o histórico da tr
   // registro com época sobrevive à migração
   const m2 = migrateState(JSON.parse(JSON.stringify(r2.state)));
   assert.equal((m2.state || m2).aportes.at(-1).deltas.find((d) => d.field === 'qty').epoch, 1);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Refinamento dos lotes: a combinação de cotas inteiras mais perto do plano
+// ---------------------------------------------------------------------------------------------
+test('lotes: cota cara com o maior alvo entra quando cabe (caso real: IVVB11 com R$ 750 em ETFs)', () => {
+  const s = st([{ id: 'e', name: 'ETFs', type: 'b3', idealPct: 100, assets: [
+    { id: 'i', ticker: 'IVVB11', idealPct: 40, price: 441.23, priceMode: 'manual' },
+    { id: 'n', ticker: 'NASD11', idealPct: 30, price: 20.93, priceMode: 'manual' },
+    { id: 'w', ticker: 'WRLD11', idealPct: 20, price: 144.52, priceMode: 'manual' },
+    { id: 'd', ticker: 'DIVO11', idealPct: 10, price: 144.31, priceMode: 'manual' }] }, CASH(0)]);
+  const p = planAporte(s, 750, {});
+  assert.ok(p.ok);
+  const it = byTicker(p.classes[0]);
+  assert.equal(it.IVVB11.qty, 1, 'IVVB11 entra');
+  assert.ok(p.toCash < 2000, `sobra pequena para o Caixa (${p.toCash / 100})`);
+  // antes: NASD11 11, WRLD11 2, DIVO11 1, IVVB11 0 e R$ 86,42 para o Caixa
+  const items = p.classes[0].items.map((x) => ({ v: 0, target: (x.ideal / 100) * 75000, price: x.price, minQty: 1 }));
+  const old = [0, 11, 2, 1];
+  const now = p.classes[0].items.map((x) => x.qty);
+  assert.ok(lotsDeviation(items, now, 75000) < lotsDeviation(items, old, 75000) / 2, 'desvio menor que a metade do de antes');
+});
+
+test('lotes: refinamento nunca passa do orçamento, nunca piora e não perde centavos (aleatório)', () => {
+  const R = rng(20261019);
+  for (let k = 0; k < 400; k++) {
+    const n = 1 + Math.floor(R() * 7);
+    const budget = 100 + Math.floor(R() * 300000);
+    const items = Array.from({ length: n }, () => {
+      const price = [0.37, 3.62, 9.36, 20.93, 47.84, 100.16, 144.52, 441.23, 1999.9][Math.floor(R() * 9)];
+      return { v: Math.floor(R() * 40000), target: 0, price, minQty: R() < 0.1 ? 100 : 1 };
+    });
+    const V = items.reduce((s2, it) => s2 + it.v, 0);
+    const w = items.map(() => R());
+    const W = w.reduce((a, b) => a + b, 0);
+    items.forEach((it, i) => { it.target = (w[i] / W) * (V + budget); });
+    const start = items.map((it) => (R() < 0.5 ? 0 : it.minQty * Math.floor(R() * 3)));
+    if (lotsDeviation(items, start, budget) === Infinity) continue;
+    const xs = refineLots(items, budget, start);
+    const spent = xs.reduce((s2, q, i) => s2 + Math.round(q * items[i].price * 100), 0);
+    assert.ok(spent <= budget, `caso ${k}: gastou ${spent} de ${budget}`);
+    assert.ok(xs.every((q, i) => q >= 0 && q % items[i].minQty === 0), `caso ${k}: lotes inteiros`);
+    assert.ok(lotsDeviation(items, xs, budget) <= lotsDeviation(items, start, budget), `caso ${k}: não piorou`);
+  }
+});
+
+test('lotes: classe grande (300 ativos) refina rápido', () => {
+  const assets = Array.from({ length: 300 }, (_, i) => ({ id: 'a' + i, ticker: 'T' + String(i).padStart(3, '0') + '3', idealPct: 100 / 300, price: 5 + (i % 37) * 3.17, priceMode: 'manual' }));
+  assets[299].idealPct = 100 - (100 / 300) * 299;
+  const s = st([{ id: 'b', name: 'Ações', type: 'b3', idealPct: 100, assets }, CASH(0)]);
+  const t0 = Date.now();
+  const p = planAporte(s, 25000, {});
+  assert.ok(p.ok, JSON.stringify(p.errors));
+  assert.ok(Date.now() - t0 < 3000, `levou ${Date.now() - t0} ms`);
+  assert.ok(p.toCash < 2000, 'quase tudo investido');
 });

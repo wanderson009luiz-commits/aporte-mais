@@ -186,6 +186,96 @@ export function validateForPlan(state, market) {
   return errors;
 }
 
+/**
+ * Desvio de uma combinação de cotas: soma dos quadrados das diferenças para o alvo de cada ativo,
+ * mais o quadrado da sobra (que vai para o Caixa e deixa a classe abaixo do plano). Centavos².
+ * items[k] = { v, target, price, minQty }; xs[k] = cotas compradas. Infinity se passar do orçamento.
+ */
+export function lotsDeviation(items, xs, budget) {
+  let spent = 0, e2 = 0;
+  items.forEach((it, k) => { const c = costCents(it.price, xs[k]); spent += c; const e = it.v + c - it.target; e2 += e * e; });
+  const L = budget - spent;
+  return L < 0 ? Infinity : e2 + L * L;
+}
+
+/** "Quem está mais longe do alvo (em % do alvo) compra primeiro", um lote por vez, enquanto couber. */
+function fillByFraction(items, budget, maxSteps = 4000) {
+  const xs = items.map(() => 0);
+  let L = budget;
+  for (let step = 0; ; step++) {
+    if (step > maxSteps) return null; // lotes muito baratos para o orçamento: o resultado proporcional já é bom
+    let best = -1, bf = 0, bd = 0, binc = 0;
+    items.forEach((it, k) => {
+      if (!(it.target > 0)) return;
+      const cur = it.v + costCents(it.price, xs[k]);
+      if (cur >= it.target - 0.5) return;
+      const inc = costCents(it.price, xs[k] + it.minQty) - costCents(it.price, xs[k]);
+      if (inc > L || inc <= 0) return;
+      const f = cur / it.target, d = it.target - cur;
+      if (best < 0 || f < bf - 1e-12 || (Math.abs(f - bf) <= 1e-12 && d > bd + 1e-9)) { best = k; bf = f; bd = d; binc = inc; }
+    });
+    if (best < 0) return xs;
+    xs[best] += items[best].minQty;
+    L -= binc;
+  }
+}
+
+/**
+ * Refina a compra em lotes: entre o resultado proporcional (fases 1 e 2) e o preenchimento por
+ * "quem está mais longe primeiro", fica com o de menor desvio; depois tenta trocar um lote de um
+ * ativo por um lote de outro (ou somar um lote) enquanto o desvio diminuir. Só ativos abaixo do
+ * alvo recebem lote; o orçamento nunca é ultrapassado; o resultado nunca é pior que o de entrada.
+ * Ex.: ETFs com R$ 750 e IVVB11 (cota de R$ 441, 40% da classe): o proporcional deixava o IVVB11
+ * de fora e mandava R$ 86 para o Caixa; aqui ele entra e a classe fica bem mais perto do plano.
+ * @returns {number[]} cotas de cada item
+ */
+export function refineLots(items, budget, start) {
+  const n = items.length;
+  if (!n || !(budget > 0)) return start.slice();
+  let xs = start.slice();
+  let best = lotsDeviation(items, xs, budget);
+  const alt = fillByFraction(items, budget);
+  if (alt) { const e = lotsDeviation(items, alt, budget); if (e < best) { xs = alt; best = e; } }
+  const cost = (k, q) => costCents(items[k].price, q);
+  const err = (k) => items[k].v + cost(k, xs[k]) - items[k].target;
+  const eps = 1e-9 * Math.max(1, budget * budget);
+  let spent = xs.reduce((sum, q, k) => sum + cost(k, q), 0);
+  const swaps = n <= 120;
+  for (let iter = 0; iter < 400; iter++) {
+    const L = budget - spent;
+    let bestD = -eps, mv = null;
+    for (let j = 0; j < n; j++) { // somar um lote
+      const ej = err(j);
+      if (!(ej < -0.5)) continue;
+      const inc = cost(j, xs[j] + items[j].minQty) - cost(j, xs[j]);
+      if (inc > L || inc <= 0) continue;
+      const d = inc * (2 * ej + inc) - inc * (2 * L - inc);
+      if (d < bestD) { bestD = d; mv = { i: -1, j, dec: 0, inc }; }
+    }
+    if (swaps) for (let i = 0; i < n; i++) { // trocar um lote de i por um lote de j
+      if (xs[i] < items[i].minQty) continue;
+      const dec = cost(i, xs[i]) - cost(i, xs[i] - items[i].minQty);
+      const ei = err(i);
+      const di = -dec * (2 * ei - dec);
+      for (let j = 0; j < n; j++) {
+        if (j === i) continue;
+        const ej = err(j);
+        if (!(ej < -0.5)) continue;
+        const inc = cost(j, xs[j] + items[j].minQty) - cost(j, xs[j]);
+        if (inc <= 0 || inc > L + dec) continue;
+        const d = di + inc * (2 * ej + inc) + (dec - inc) * (2 * L + dec - inc);
+        if (d < bestD) { bestD = d; mv = { i, j, dec, inc }; }
+      }
+    }
+    if (!mv) break;
+    if (mv.i >= 0) xs[mv.i] -= items[mv.i].minQty;
+    xs[mv.j] += items[mv.j].minQty;
+    spent += mv.inc - mv.dec;
+  }
+  // trava final: nunca pior que a entrada e nunca acima do orçamento
+  return lotsDeviation(items, xs, budget) <= lotsDeviation(items, start, budget) ? xs : start.slice();
+}
+
 /** Planeja a compra de uma classe com ativos. Valores em centavos. */
 function planClass(c, budgetBRL, rate, quotes) {
   const mode = buyMode(c);
@@ -241,11 +331,14 @@ function planClass(c, budgetBRL, rate, quotes) {
     })), left);
     act.forEach((it, k) => {
       const n = res.lots[k];
-      if (n > 0) {
-        if (it.share < it.lotCost) it.complemento = true; // a parte dele não pagava uma cota: veio da sobra
-        it.qty += n * it.minQty;
-        it.value = costCents(it.price, it.qty);
-      }
+      if (n > 0) { it.qty += n * it.minQty; it.value = costCents(it.price, it.qty); }
+    });
+    // 3) refinamento: a combinação de cotas inteiras mais perto dos alvos (ver refineLots)
+    const xs = refineLots(act, budget, act.map((it) => it.qty));
+    act.forEach((it, k) => {
+      it.qty = xs[k];
+      it.value = costCents(it.price, it.qty);
+      it.complemento = it.qty > 0 && it.share < it.lotCost; // a parte dele não pagava uma cota: veio da sobra
     });
     items.forEach((it) => { if (it.status === 'ok' && it.value === 0) it.status = 'lote_caro'; });
   } else {
