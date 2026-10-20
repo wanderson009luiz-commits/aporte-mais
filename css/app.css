@@ -536,6 +536,8 @@ input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 3px rgba(16
   .rc-right{grid-area:rt; gap:12px;}
   .rc-aporte{min-width:108px;}
   .toast{bottom:calc(86px + env(safe-area-inset-bottom));}
+  /* o cabeçalho fica preso no topo: rolagens automáticas (resultado do cálculo, campo com erro) param abaixo dele */
+  html{scroll-padding-top:84px;}
   /* aqui o subtítulo da marca some e o texto do login sobe: a roseta fica menor para não encostar nele */
   .auth-card{background-position:right -52px top -52px, left bottom, 0 0; background-size:160px 160px, 100% 90px, auto;}
 }
