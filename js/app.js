@@ -10,7 +10,7 @@ import {
 import { planAporte, applyPlan, revertAporte, stateSignature, validateForPlan, alignmentScore } from './engine.js?v=dev';
 import { newsAssets, cleanNewsRows, filterNews, groupByAsset, newsCounts, attentionByAsset, NEWS_WINDOW_DAYS } from './news.js?v=dev';
 
-const APP_VERSION = '4.2.2';
+const APP_VERSION = '4.3.0';
 const SUPABASE_URL = 'https://vldiylyynkgprpfxyyej.supabase.co';
 // Chave pública (anon) — é feita para ficar no navegador; a proteção real são as regras RLS do banco.
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsZGl5bHl5bmtncHJwZnh5eWVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxNjA4NTYsImV4cCI6MjEwNDczNjg1Nn0.mlv8I8EOtRhiZyw2PlVnp2mNMXLZCTJr0acDLMKKjy0';
@@ -1042,7 +1042,7 @@ function renderPainel() {
         <div class="alloc-bar"><div class="ledger-bar" style="margin:0 0 4px;"><div class="ledger-bar-fill" style="width:${Math.min(100, r.cur)}%; background:${classColor(r.idx)};"></div><div class="ledger-bar-target" style="left:${Math.min(100, r.ideal)}%"></div></div>
         <div class="rc-pcts" style="margin-top:0;">atual ${pct1(r.cur)}% · ideal ${pct(r.ideal)}%</div></div><div class="alloc-gap">${gapTxt}</div></div>`;
     }).join('');
-    distHtml = `<div class="chart-wrap"><div class="comp-bar">${segs}</div><div class="chart-tip"></div></div>${list}<div class="legend"><span><span style="display:inline-block;width:2px;height:12px;background:var(--brass);"></span>Marca dourada = percentual ideal</span></div>`;
+    distHtml = `<div class="chart-wrap"><div class="comp-bar">${segs}</div><div class="chart-tip"></div></div>${list}<div class="legend"><span><span class="legend-pin" aria-hidden="true"></span>Marcador = percentual ideal</span></div>`;
   }
   let evoHtml;
   if (!aportes.length) evoHtml = '<div class="panel-empty">Nenhum aporte registrado ainda. Cada aporte registrado vira um ponto neste gráfico.<br><button class="btn btn-sm" data-goto="aporte">Fazer um aporte</button></div>';
@@ -1269,8 +1269,8 @@ function renderResultado() {
     let body;
     if (c.items.length) {
       body = `<div class="asset-row asset-row-head" style="border-bottom:1px solid var(--border-strong); padding-bottom:8px; margin-bottom:2px;">
-        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint);">Ativo</div><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint);">Atual vs ideal</div>
-        <div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); text-align:right;">Preço</div><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); text-align:right;">Qtd.</div><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); text-align:right;">Valor</div></div>` +
+        <div class="col-head">Ativo</div><div class="col-head">Atual vs ideal</div>
+        <div class="col-head r">Preço</div><div class="col-head r">Qtd.</div><div class="col-head r">Valor</div></div>` +
         c.items.map((it) => {
           const st = { na_meta: '<div class="badge info">no alvo</div>', sem_preco: '<div class="badge skip">sem preço</div>', lote_caro: '<div class="badge warn">cota acima da sobra</div>', abaixo_minimo: '<div class="badge warn">abaixo do mínimo</div>', ok: it.value > 0 ? '<div class="badge done">na ordem</div>' : '' }[it.status] || '';
           return `<div class="asset-row"><div class="asset-ticker">${esc(normTicker(it.a.ticker))}${st}</div>
@@ -1280,7 +1280,7 @@ function renderResultado() {
             <div class="asset-suggest ${it.value > 0 ? '' : 'zero'}">${moneyC(it.value, c.currency)}</div></div>`;
         }).join('');
     } else body = `<div class="caixa-note">${c.isCash ? 'Sua reserva de Caixa de Oportunidade — recebe a parte do plano e as sobras.' : 'Classe de valor direto — o valor entra direto no saldo dela.'}</div>`;
-    return `<div class="result-class"><div class="result-class-head" data-toggle="${esc(c.classId)}" role="button" tabindex="0" aria-expanded="false"><div class="rc-left"><div class="rc-name"><span class="swatch" style="display:inline-block; background:${classColor(idx)}; margin-right:8px;"></span>${esc(c.name)}</div>
+    return `<div class="result-class"><div class="result-class-head" data-toggle="${esc(c.classId)}" role="button" tabindex="0" aria-expanded="false"><div class="rc-left"><div class="rc-name"><span class="swatch" style="display:inline-block; background:${classColor(idx)}; margin-right:8px;"></span><span class="rc-name-txt" title="${esc(c.name)}">${esc(c.name)}</span></div>
       <div class="rc-bar-wrap"><div class="ledger-bar"><div class="ledger-bar-fill ${curPct >= c.idealPct ? 'over' : 'under'}" style="width:${Math.min(100, curPct)}%"></div><div class="ledger-bar-target" style="left:${Math.min(100, c.idealPct)}%"></div></div><div class="rc-pcts">atual ${pct1(curPct)}% · ideal ${pct(c.idealPct)}%</div></div></div>
       <div class="rc-right"><div class="rc-aporte"><div class="k">Recebe</div><div class="v ${c.allocBRL > 0 ? '' : 'zero'}">${moneyC(c.allocBRL)}</div></div><div class="chev">▸</div></div></div>
       <div class="result-class-body">${body}</div></div>`;
@@ -1294,7 +1294,7 @@ function renderResultado() {
   $('btn-registrar').addEventListener('click', registrarAporte);
   $('btn-copy-order').addEventListener('click', async () => {
     const txt = `Aporte+ — ordem de ${fmtDateBR(todayISO())}\nAporte: ${moneyC(plan.aporte)}\n` + orderLines(plan).join('\n');
-    try { await navigator.clipboard.writeText(txt); toast('Ordem copiada.'); } catch { dialog({ title: 'Copiar ordem', html: `<textarea style="width:100%; height:200px; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:IBM Plex Mono, monospace; font-size:12px;">${esc(txt)}</textarea>` }); }
+    try { await navigator.clipboard.writeText(txt); toast('Ordem copiada.'); } catch { dialog({ title: 'Copiar ordem', html: `<textarea style="width:100%; height:200px; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px;">${esc(txt)}</textarea>` }); }
   });
 }
 
@@ -1517,7 +1517,7 @@ function renderAtivos() {
         <div class="term-panel-row"><div class="field small"><label>Nota (0-100)</label><input class="plain-input" style="width:80px;" inputmode="numeric" value="${a.termometro.nota === null ? '' : esc(a.termometro.nota)}" ${k('nota')} placeholder="—"></div><div style="font-size:12px; color:${tl.color}; font-weight:600;">${tl.label}</div></div>
         <div data-motivos></div>
         <button class="btn btn-sm btn-ghost" data-action="add-motivo" data-key="${esc(a.id)}:add-motivo">+ Adicionar motivo</button>
-        <div class="sentiment-box" style="margin-top:16px;"><div style="font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-faint); margin-bottom:8px;">Leitura automática de notícias</div>${renderSentimentBox(a.ticker)}</div>
+        <div class="sentiment-box" style="margin-top:16px;"><div class="sub-label">Leitura automática de notícias</div>${renderSentimentBox(a.ticker)}</div>
       </div>`;
     const on = (f, ev, fn) => { const el = card.querySelector(`[data-f="${f}"]`); if (el) el.addEventListener(ev, fn); };
     const field = (f, opts, apply) => on(f, 'change', (e) => { if (fieldOr(e.target, opts, apply)) scheduleSave(); again(); });
@@ -1767,13 +1767,13 @@ function renderAgenda() {
   opt.querySelectorAll('[data-freq]').forEach((b) => b.addEventListener('click', () => { ag.frequency = b.dataset.freq; scheduleSave(); renderAgenda(); }));
   const d = $('agenda-detail');
   if (ag.frequency === 'semanal' || ag.frequency === 'quinzenal') {
-    d.innerHTML = `<div class="field"><label for="agenda-weekday" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Dia da semana</label><select class="name-input" id="agenda-weekday" style="width:160px;">${WEEKDAYS.map((w, i) => `<option value="${i}" ${Number(ag.weekday) === i ? 'selected' : ''}>${w}</option>`).join('')}</select></div>`;
+    d.innerHTML = `<div class="field"><label for="agenda-weekday">Dia da semana</label><select class="name-input" id="agenda-weekday" style="width:160px;">${WEEKDAYS.map((w, i) => `<option value="${i}" ${Number(ag.weekday) === i ? 'selected' : ''}>${w}</option>`).join('')}</select></div>`;
     $('agenda-weekday').addEventListener('change', (e) => { ag.weekday = Number(e.target.value); scheduleSave(); renderAgenda(); });
   } else if (ag.frequency === 'mensal') {
-    d.innerHTML = `<div class="field"><label for="agenda-day" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Dia do mês (1 a 28)</label><input class="plain-input" style="width:80px; text-align:left;" id="agenda-day" inputmode="numeric" value="${esc(ag.dayOfMonth || 5)}"></div>`;
+    d.innerHTML = `<div class="field"><label for="agenda-day">Dia do mês (1 a 28)</label><input class="plain-input" style="width:80px; text-align:left;" id="agenda-day" inputmode="numeric" value="${esc(ag.dayOfMonth || 5)}"></div>`;
     $('agenda-day').addEventListener('change', (e) => { if (fieldOr(e.target, { label: 'Dia do mês', min: 1, max: 28, int: true, allowEmpty: false }, (r) => { ag.dayOfMonth = r.value; })) scheduleSave(); renderAgenda(); });
   } else if (ag.frequency === 'personalizado') {
-    d.innerHTML = `<div class="field" style="min-width:260px;"><label for="agenda-note" style="font-size:11px; text-transform:uppercase; color:var(--text-faint); display:block; margin-bottom:8px;">Sua rotina (nota livre)</label><input class="name-input" id="agenda-note" maxlength="120" value="${esc(ag.customNote || '')}" placeholder="ex: aporto quando sobra dinheiro no fim do mês"></div>`;
+    d.innerHTML = `<div class="field" style="min-width:260px;"><label for="agenda-note">Sua rotina (nota livre)</label><input class="name-input" id="agenda-note" maxlength="120" value="${esc(ag.customNote || '')}" placeholder="ex: aporto quando sobra dinheiro no fim do mês"></div>`;
     $('agenda-note').addEventListener('input', (e) => { ag.customNote = e.target.value.slice(0, 120); renderAgendaNext(); });
     $('agenda-note').addEventListener('change', () => { scheduleSave(); renderTopbar(); });
   } else d.innerHTML = '';

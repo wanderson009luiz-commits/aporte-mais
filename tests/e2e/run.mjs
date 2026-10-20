@@ -13,9 +13,8 @@ const { chromium } = await import(process.env.PW_PATH || 'playwright');
 
 // site de teste: o app de verdade, trocando só o Supabase pelo falso
 const site = fs.mkdtempSync('/tmp/aporte-e2e-');
-for (const f of ['index.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png']) fs.copyFileSync(path.join(root, f), path.join(site, f));
-fs.cpSync(path.join(root, 'css'), path.join(site, 'css'), { recursive: true });
-fs.cpSync(path.join(root, 'js'), path.join(site, 'js'), { recursive: true });
+for (const f of ['index.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png']) fs.copyFileSync(path.join(root, f), path.join(site, f));
+for (const d of ['css', 'js', 'fonts', 'img']) fs.cpSync(path.join(root, d), path.join(site, d), { recursive: true });
 fs.copyFileSync(path.join(here, 'fixtures.js'), path.join(site, 'fixtures.js'));
 fs.copyFileSync(path.join(here, 'fake-supabase.js'), path.join(site, 'fake-supabase.js'));
 let html = fs.readFileSync(path.join(site, 'index.html'), 'utf8');
@@ -24,7 +23,7 @@ if (!html.includes(vendorTag)) throw new Error('tag do supabase não encontrada 
 html = html.replace(vendorTag, '<script src="fixtures.js" defer></script><script src="fake-supabase.js" defer></script>');
 fs.writeFileSync(path.join(site, 'index.html'), html);
 
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
+const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.woff2': 'font/woff2' };
 const server = http.createServer((req, res) => {
   const p = path.join(site, decodeURIComponent(new URL(req.url, 'http://x').pathname));
   if (!p.startsWith(site) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { res.writeHead(404); res.end('nf'); return; }
