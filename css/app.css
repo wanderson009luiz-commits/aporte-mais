@@ -536,6 +536,8 @@ input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 3px rgba(16
   .rc-right{grid-area:rt; gap:12px;}
   .rc-aporte{min-width:108px;}
   .toast{bottom:calc(86px + env(safe-area-inset-bottom));}
+  /* aqui o subtítulo da marca some e o texto do login sobe: a roseta fica menor para não encostar nele */
+  .auth-card{background-position:right -52px top -52px, left bottom, 0 0; background-size:160px 160px, 100% 90px, auto;}
 }
 
 @media (max-width: 640px){
@@ -579,7 +581,6 @@ input.invalid{border-color:var(--coral) !important; box-shadow:0 0 0 3px rgba(16
   .order-actions .btn{flex:1; justify-content:center;}
   .kpi{padding:14px 14px;}
   .kpi .v{font-size:22px;}
-  .auth-card{background-position:right -52px top -52px, left bottom, 0 0; background-size:160px 160px, 100% 90px, auto;}
   .alloc-row{grid-template-columns:minmax(0,1fr) 104px; grid-template-areas:"nm gp" "br br"; gap:6px 10px;}
   .alloc-row > .alloc-name{grid-area:nm;} .alloc-row > .alloc-bar{grid-area:br;} .alloc-row > .alloc-gap{grid-area:gp;}
   .asset-card-main .field.ticker{flex:1 1 100%;}
